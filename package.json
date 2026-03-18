@@ -1,0 +1,19 @@
+{
+  "name": "claude-manager-cli",
+  "version": "1.0.0",
+  "description": "从 credentials.json 选择 provider/model 并写入 ~/.claude/settings.json",
+  "type": "module",
+  "bin": {
+    "claude-manager": "./bin/cli.mjs"
+  },
+  "scripts": {
+    "start": "node bin/cli.mjs",
+    "claude-manager": "node bin/cli.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.2.0"
+  }
+}
