@@ -5,7 +5,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { select, input, confirm } from '@inquirer/prompts';
+
+const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function parseArgs(argv) {
   const args = { file: null };
@@ -24,8 +27,14 @@ function printHelp() {
   console.log(`
 用法: cc-use-model [选项]
 
-  -f, --file <path>   credentials.json 路径（默认: 当前目录 credentials.json）
+  -f, --file <path>   凭据文件路径（见下方默认查找顺序）
   -h, --help          显示帮助
+
+  未指定 -f 时依次尝试:
+    1) 环境变量 CC_USE_MODEL_CREDENTIALS
+    2) 当前目录 ./credentials.json
+    3) 本工具安装目录下的 credentials.json（npm link 时即项目根）
+    4) ~/.config/cc-use-model/credentials.json
 
 会交互选择 provider 与 model，并合并写入 ~/.claude/settings.json 中的 env：
   ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL
@@ -59,6 +68,51 @@ function loadOrInitSettings(settingsPath) {
   }
 }
 
+function settingsPathClaude() {
+  return path.join(os.homedir(), '.claude', 'settings.json');
+}
+
+/** 与 provider 的 apiUrl 比较时统一格式 */
+function normalizeBaseUrl(url) {
+  if (!url || typeof url !== 'string') return '';
+  return url.trim().replace(/\/+$/, '');
+}
+
+/** 当前 ~/.claude/settings.json 中的 baseUrl、model */
+function getCurrentClaudeSelection() {
+  const s = loadOrInitSettings(settingsPathClaude());
+  const env = s.env && typeof s.env === 'object' ? s.env : {};
+  return {
+    baseUrl: env.ANTHROPIC_BASE_URL,
+    model: typeof env.ANTHROPIC_MODEL === 'string' ? env.ANTHROPIC_MODEL.trim() : '',
+  };
+}
+
+/** 匹配的项保持原相对顺序，整体排到最前 */
+function orderCurrentFirst(items, isCurrent) {
+  const head = [];
+  const tail = [];
+  for (const item of items) {
+    (isCurrent(item) ? head : tail).push(item);
+  }
+  return [...head, ...tail];
+}
+
+function resolveCredentialsPathAuto() {
+  const candidates = [];
+  const envPath = process.env.CC_USE_MODEL_CREDENTIALS?.trim();
+  if (envPath) candidates.push(path.resolve(envPath));
+  candidates.push(path.join(process.cwd(), 'credentials.json'));
+  candidates.push(path.join(PKG_ROOT, 'credentials.json'));
+  candidates.push(
+    path.join(os.homedir(), '.config', 'cc-use-model', 'credentials.json')
+  );
+  for (const p of candidates) {
+    if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
+  }
+  return null;
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
@@ -66,14 +120,29 @@ async function main() {
     process.exit(0);
   }
 
-  const credPath = path.resolve(
-    args.file || path.join(process.cwd(), 'credentials.json')
-  );
-  if (!fs.existsSync(credPath)) {
-    console.error(`未找到凭据文件: ${credPath}`);
-    console.error('请复制 credentials.json.example 为 credentials.json 并填写，或使用 -f 指定路径。');
-    process.exit(1);
+  let credPath;
+  if (args.file) {
+    credPath = path.resolve(args.file);
+    if (!fs.existsSync(credPath)) {
+      console.error(`未找到凭据文件: ${credPath}`);
+      process.exit(1);
+    }
+  } else {
+    credPath = resolveCredentialsPathAuto();
+    if (!credPath) {
+      console.error('未找到 credentials.json，已按顺序尝试:');
+      if (process.env.CC_USE_MODEL_CREDENTIALS?.trim()) {
+        console.error(`  - ${path.resolve(process.env.CC_USE_MODEL_CREDENTIALS.trim())}`);
+      }
+      console.error(`  - ${path.join(process.cwd(), 'credentials.json')}`);
+      console.error(`  - ${path.join(PKG_ROOT, 'credentials.json')}`);
+      console.error(`  - ${path.join(os.homedir(), '.config', 'cc-use-model', 'credentials.json')}`);
+      console.error('可将凭据放在上述任一路径，或: export CC_USE_MODEL_CREDENTIALS=/path/to/credentials.json');
+      process.exit(1);
+    }
   }
+
+  console.log(`使用凭据: ${credPath}`);
 
   let credentials;
   try {
@@ -83,26 +152,53 @@ async function main() {
     process.exit(1);
   }
 
-  const providerKeys = Object.keys(credentials);
+  const { baseUrl: currentBaseUrl, model: currentModel } = getCurrentClaudeSelection();
+  const currentUrlNorm = normalizeBaseUrl(currentBaseUrl);
+
+  const providerKeys = orderCurrentFirst(Object.keys(credentials), (name) => {
+    if (!currentUrlNorm) return false;
+    return normalizeBaseUrl(credentials[name].apiUrl) === currentUrlNorm;
+  });
+
   const provider = await select({
     message: '选择 Provider',
-    choices: providerKeys.map((name) => ({ name, value: name })),
+    choices: providerKeys.map((name) => {
+      const isCur =
+        currentUrlNorm &&
+        normalizeBaseUrl(credentials[name].apiUrl) === currentUrlNorm;
+      return {
+        name: isCur ? `${name} （当前选择）` : name,
+        value: name,
+      };
+    }),
   });
 
   const cfg = credentials[provider];
   let model;
 
   if (Array.isArray(cfg.models) && cfg.models.length > 0) {
+    const modelsOrdered = orderCurrentFirst(
+      cfg.models.map((m) => String(m)),
+      (m) => Boolean(currentModel && m === currentModel)
+    );
     model = await select({
       message: `选择 Model（${provider}）`,
-      choices: cfg.models.map((m) => ({ name: String(m), value: String(m) })),
+      choices: modelsOrdered.map((m) => ({
+        name: currentModel && m === currentModel ? `${m} （当前选择）` : m,
+        value: m,
+      })),
     });
   } else {
+    const hint =
+      currentModel && (!cfg.models || cfg.models.length === 0)
+        ? `（回车沿用当前：${currentModel}）`
+        : '';
     model = await input({
-      message: '该 provider 未配置 models，请输入 model 名称',
-      validate: (v) => (v && v.trim() ? true : '不能为空'),
+      message: `该 provider 未配置 models，请输入 model 名称${hint}`,
+      default: currentModel || undefined,
+      validate: (v) => (v && String(v).trim() ? true : '不能为空'),
     });
-    model = model.trim();
+    model = String(model).trim();
   }
 
   const ok = await confirm({
@@ -116,7 +212,7 @@ async function main() {
 
   const home = os.homedir();
   const claudeDir = path.join(home, '.claude');
-  const settingsPath = path.join(claudeDir, 'settings.json');
+  const settingsPath = settingsPathClaude();
 
   if (!fs.existsSync(claudeDir)) {
     fs.mkdirSync(claudeDir, { recursive: true });
