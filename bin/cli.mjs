@@ -22,7 +22,7 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`
-用法: claude-manager [选项]
+用法: cc-use-model [选项]
 
   -f, --file <path>   credentials.json 路径（默认: 当前目录 credentials.json）
   -h, --help          显示帮助

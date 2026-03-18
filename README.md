@@ -1,4 +1,4 @@
-# Claude Manager CLI
+# cc-use-model
 
 从**当前工作目录**的 `credentials.json` 交互选择（也可用 `-f` 指定路径） **provider** 与 **model**，并合并写入 `~/.claude/settings.json` 的 `env`（`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`）。
 
@@ -33,7 +33,7 @@ npm start
 npx node bin/cli.mjs
 # 全局链接后
 npm link
-claude-manager
+cc-use-model
 ```
 
 指定凭据文件：

@@ -1,14 +1,14 @@
 {
-  "name": "claude-manager-cli",
+  "name": "cc-use-model",
   "version": "1.0.0",
   "description": "从 credentials.json 选择 provider/model 并写入 ~/.claude/settings.json",
   "type": "module",
   "bin": {
-    "claude-manager": "./bin/cli.mjs"
+    "cc-use-model": "./bin/cli.mjs"
   },
   "scripts": {
     "start": "node bin/cli.mjs",
-    "claude-manager": "node bin/cli.mjs"
+    "cc-use-model": "node bin/cli.mjs"
   },
   "engines": {
     "node": ">=18"
