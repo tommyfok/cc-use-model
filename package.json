@@ -3,9 +3,16 @@
   "version": "1.0.0",
   "description": "从 credentials.json 选择 provider/model 并写入 ~/.claude/settings.json",
   "type": "module",
+  "main": "./bin/cli.mjs",
   "bin": {
     "cc-use-model": "./bin/cli.mjs"
   },
+  "files": [
+    "bin/",
+    "credentials.json.example",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node bin/cli.mjs",
     "cc-use-model": "node bin/cli.mjs"
@@ -13,6 +20,24 @@
   "engines": {
     "node": ">=18"
   },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "model",
+    "provider",
+    "cli",
+    "anthropic"
+  ],
+  "author": "Tommy <154274174@qq.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tommyfok/cc-use-model.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tommyfok/cc-use-model/issues"
+  },
+  "homepage": "https://github.com/tommyfok/cc-use-model#readme",
   "dependencies": {
     "@inquirer/prompts": "^7.2.0"
   }

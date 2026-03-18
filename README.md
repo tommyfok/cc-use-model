@@ -1,12 +1,19 @@
 # cc-use-model
 
-交互选择 provider/model；凭据文件会自动查找（不必先 `cd` 到项目目录），也可用 `-f` 或环境变量指定。 **provider** 与 **model**，并合并写入 `~/.claude/settings.json` 的 `env`（`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`）。
+[English](#english) | 中文
+
+交互式选择 Claude Code 的 provider 和 model，自动将配置写入 `~/.claude/settings.json`。
+
+凭据文件自动查找，支持多路径探测，也可通过参数或环境变量指定。
 
 ## 安装
 
 ```bash
-cd ClaudeManager
-npm install
+# 全局安装
+npm install -g cc-use-model
+
+# 或使用 npx（无需安装）
+npx cc-use-model
 ```
 
 ## 凭据格式 `credentials.json`
@@ -28,25 +35,23 @@ cp credentials.json.example credentials.json
 ## 使用
 
 ```bash
-npm start
-# 或
-npx node bin/cli.mjs
-# 全局链接后
-npm link
+# 直接运行（全局安装后）
+cc-use-model
+
+# 指定凭据文件
+cc-use-model -f /path/to/credentials.json
+
+# 通过环境变量指定
+export CC_USE_MODEL_CREDENTIALS=/path/to/credentials.json
 cc-use-model
 ```
 
-**凭据查找顺序**（未写 `-f` 时）：
+**凭据查找顺序**（未指定 `-f` 时）：
 
 1. 环境变量 `CC_USE_MODEL_CREDENTIALS` 指向的文件
 2. 当前目录 `./credentials.json`
-3. **本工具所在目录**下的 `credentials.json`（`npm link` 后从任意目录执行都会读到项目里的凭据）
+3. 本工具所在目录下的 `credentials.json`（`npm link` 后从任意目录执行都会读到）
 4. `~/.config/cc-use-model/credentials.json`
-
-```bash
-cc-use-model -f /path/to/credentials.json
-export CC_USE_MODEL_CREDENTIALS=/path/to/credentials.json && cc-use-model
-```
 
 ## 行为说明
 
@@ -56,3 +61,75 @@ export CC_USE_MODEL_CREDENTIALS=/path/to/credentials.json && cc-use-model
 ## 安全
 
 请勿将含真实密钥的 `credentials.json` 提交到 Git；建议加入 `.gitignore`。
+
+## License
+
+MIT
+
+---
+
+# English
+
+Interactively select provider and model for Claude Code, automatically writing configuration to `~/.claude/settings.json`.
+
+Credentials file is auto-discovered across multiple paths, or can be specified via flag or environment variable.
+
+## Installation
+
+```bash
+# Global install
+npm install -g cc-use-model
+
+# Or use npx (no installation needed)
+npx cc-use-model
+```
+
+## Credentials Format `credentials.json`
+
+Copy the example and fill in:
+
+```bash
+cp credentials.json.example credentials.json
+```
+
+Each top-level key is a provider with the following structure:
+
+| Field    | Description                                    |
+| -------- | ---------------------------------------------- |
+| `apiUrl` | Required, Anthropic-compatible API endpoint     |
+| `apiKey` | Required, authentication token                  |
+| `models` | Optional, string array; if omitted, input model manually at runtime |
+
+## Usage
+
+```bash
+# Run directly (after global install)
+cc-use-model
+
+# Specify credentials file
+cc-use-model -f /path/to/credentials.json
+
+# Via environment variable
+export CC_USE_MODEL_CREDENTIALS=/path/to/credentials.json
+cc-use-model
+```
+
+**Credentials lookup order** (when `-f` not specified):
+
+1. File pointed by `CC_USE_MODEL_CREDENTIALS` environment variable
+2. `./credentials.json` in current directory
+3. `credentials.json` in the tool's directory
+4. `~/.config/cc-use-model/credentials.json`
+
+## Behavior
+
+- Preserves all existing fields in `settings.json` (e.g., `skipDangerousModePermissionPrompt`)
+- Preserves other `env` variables, only overwrites `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and `ANTHROPIC_MODEL`
+
+## Security
+
+Do not commit `credentials.json` with real API keys to Git. Add it to `.gitignore`.
+
+## License
+
+MIT
