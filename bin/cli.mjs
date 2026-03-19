@@ -181,22 +181,73 @@ async function main() {
     return normalizeBaseUrl(c.apiUrl) === currentUrlNorm;
   });
 
+  // 特殊选项：清空配置
+  const CLEAR_CHOICE = '__CLEAR__';
+
   const provider = await select({
     message: '选择 Provider',
-    choices: providerKeys.map((name) => {
-      const c = credentials[name];
-      const isCur =
-        (c?.env &&
-          currentEnvKey &&
-          Object.keys(c.env).length === currentEnvKey.length &&
-          Object.keys(c.env).every((k) => currentEnvKey.includes(k))) ||
-        (currentUrlNorm && c?.apiUrl && normalizeBaseUrl(c.apiUrl) === currentUrlNorm);
-      return {
-        name: isCur ? `${name} （当前选择）` : name,
-        value: name,
-      };
-    }),
+    choices: [
+      ...providerKeys.map((name) => {
+        const c = credentials[name];
+        const isCur =
+          (c?.env &&
+            currentEnvKey &&
+            Object.keys(c.env).length === currentEnvKey.length &&
+            Object.keys(c.env).every((k) => currentEnvKey.includes(k))) ||
+          (currentUrlNorm && c?.apiUrl && normalizeBaseUrl(c.apiUrl) === currentUrlNorm);
+        return {
+          name: isCur ? `${name} （当前选择）` : name,
+          value: name,
+        };
+      }),
+      { name: '🗑️  清空配置（恢复无 API Key 状态）', value: CLEAR_CHOICE },
+    ],
   });
+
+  // 处理清空配置
+  if (provider === CLEAR_CHOICE) {
+    const ok = await confirm({
+      message: '将清空 ~/.claude/settings.json 中的 env 配置（ANTHROPIC_AUTH_TOKEN、ANTHROPIC_BASE_URL、ANTHROPIC_MODEL 等）\n确认？',
+      default: true,
+    });
+    if (!ok) {
+      console.log('已取消。');
+      process.exit(0);
+    }
+
+    const home = os.homedir();
+    const claudeDir = path.join(home, '.claude');
+    const settingsPath = settingsPathClaude();
+
+    if (!fs.existsSync(claudeDir)) {
+      fs.mkdirSync(claudeDir, { recursive: true });
+    }
+
+    const settings = loadOrInitSettings(settingsPath);
+    const env = settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env) ? settings.env : {};
+
+    // 清理 envKey 对应的 env 变量
+    if (Array.isArray(settings.envKey)) {
+      for (const k of settings.envKey) {
+        if (typeof k === 'string' && k in env) delete env[k];
+      }
+      delete settings.envKey;
+    }
+
+    // 清理 ANTHROPIC 相关字段
+    delete env.ANTHROPIC_AUTH_TOKEN;
+    delete env.ANTHROPIC_BASE_URL;
+    delete env.ANTHROPIC_MODEL;
+
+    // 清理顶层 model 字段
+    delete settings.model;
+
+    settings.env = env;
+
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+    console.log(`已清空配置: ${settingsPath}`);
+    process.exit(0);
+  }
 
   const cfg = credentials[provider];
   let model;

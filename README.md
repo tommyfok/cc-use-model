@@ -59,6 +59,7 @@ cc-use-model
 - 会**保留** `settings.json` 里除 env 以外的字段（如 `skipDangerousModePermissionPrompt`）。
 - 使用普通 provider（`apiUrl/apiKey`）时：其它 `env` 变量会保留，仅覆盖 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`。
 - 使用 `env` provider 时：会覆盖写入 `env` 中提供的键，以及 `ANTHROPIC_MODEL`；并记录 `envKey`（写入过的 env 键列表），用于下次切换到无 `env` 的 provider 时自动清理这些键。
+- 选择 **清空配置** 选项时：会清空 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL` 以及之前通过 `env` provider 写入的所有键，恢复到无 API Key 状态。
 
 ## 安全
 
@@ -127,6 +128,7 @@ cc-use-model
 
 - Preserves all existing fields in `settings.json` (e.g., `skipDangerousModePermissionPrompt`)
 - Preserves other `env` variables, only overwrites `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and `ANTHROPIC_MODEL`
+- Selecting **Clear Configuration** will remove `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` and any keys written by `env` providers, restoring to no API key state
 
 ## Security
 
