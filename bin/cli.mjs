@@ -134,6 +134,7 @@ async function main() {
   }
 
   let credPath;
+  let noCredentialsFile = false;
   if (args.file) {
     credPath = path.resolve(args.file);
     if (!fs.existsSync(credPath)) {
@@ -143,26 +144,24 @@ async function main() {
   } else {
     credPath = resolveCredentialsPathAuto();
     if (!credPath) {
-      console.error('未找到 credentials.json，已按顺序尝试:');
-      if (process.env.CC_USE_MODEL_CREDENTIALS?.trim()) {
-        console.error(`  - ${path.resolve(process.env.CC_USE_MODEL_CREDENTIALS.trim())}`);
-      }
-      console.error(`  - ${path.join(process.cwd(), 'credentials.json')}`);
-      console.error(`  - ${path.join(PKG_ROOT, 'credentials.json')}`);
-      console.error(`  - ${path.join(os.homedir(), '.config', 'cc-use-model', 'credentials.json')}`);
-      console.error('可将凭据放在上述任一路径，或: export CC_USE_MODEL_CREDENTIALS=/path/to/credentials.json');
-      process.exit(1);
+      noCredentialsFile = true;
+      // 默认使用 ~/.config/cc-use-model/credentials.json
+      credPath = path.join(os.homedir(), '.config', 'cc-use-model', 'credentials.json');
     }
   }
 
-  console.log(`使用凭据: ${credPath}`);
+  if (!noCredentialsFile) {
+    console.log(`使用凭据: ${credPath}`);
+  }
 
-  let credentials;
-  try {
-    credentials = loadCredentials(credPath);
-  } catch (e) {
-    console.error('读取 credentials.json 失败:', e.message);
-    process.exit(1);
+  let credentials = {};
+  if (!noCredentialsFile) {
+    try {
+      credentials = loadCredentials(credPath);
+    } catch (e) {
+      console.error('读取 credentials.json 失败:', e.message);
+      process.exit(1);
+    }
   }
 
   const { baseUrl: currentBaseUrl, model: currentModel, envKey: currentEnvKey } = getCurrentClaudeSelection();
@@ -181,28 +180,127 @@ async function main() {
     return normalizeBaseUrl(c.apiUrl) === currentUrlNorm;
   });
 
-  // 特殊选项：清空配置
+  // 特殊选项：增加配置、清空配置
+  const ADD_CHOICE = '__ADD__';
   const CLEAR_CHOICE = '__CLEAR__';
 
-  const provider = await select({
-    message: '选择 Provider',
-    choices: [
-      ...providerKeys.map((name) => {
-        const c = credentials[name];
-        const isCur =
-          (c?.env &&
-            currentEnvKey &&
-            Object.keys(c.env).length === currentEnvKey.length &&
-            Object.keys(c.env).every((k) => currentEnvKey.includes(k))) ||
-          (currentUrlNorm && c?.apiUrl && normalizeBaseUrl(c.apiUrl) === currentUrlNorm);
-        return {
-          name: isCur ? `${name} （当前选择）` : name,
-          value: name,
-        };
-      }),
-      { name: '🗑️  清空配置（恢复无 API Key 状态）', value: CLEAR_CHOICE },
-    ],
-  });
+  // 如果没有凭据文件，直接进入增加配置流程
+  let provider;
+  if (noCredentialsFile) {
+    provider = ADD_CHOICE;
+  } else {
+    provider = await select({
+      message: '选择 Provider',
+      choices: [
+        ...providerKeys.map((name) => {
+          const c = credentials[name];
+          const isCur =
+            (c?.env &&
+              currentEnvKey &&
+              Object.keys(c.env).length === currentEnvKey.length &&
+              Object.keys(c.env).every((k) => currentEnvKey.includes(k))) ||
+            (currentUrlNorm && c?.apiUrl && normalizeBaseUrl(c.apiUrl) === currentUrlNorm);
+          return {
+            name: isCur ? `${name} （当前选择）` : name,
+            value: name,
+          };
+        }),
+        { name: '➕  增加配置', value: ADD_CHOICE },
+        { name: '🗑️  清空配置（恢复无 API Key 状态）', value: CLEAR_CHOICE },
+      ],
+    });
+  }
+
+  // 处理增加配置
+  if (provider === ADD_CHOICE) {
+    // 让用户填写 provider 名称，如果已有凭据则提供选择
+    let newProviderName;
+    if (Object.keys(credentials).length > 0) {
+      newProviderName = await select({
+        message: '选择或输入 Provider 名称',
+        choices: [
+          ...Object.keys(credentials).map((name) => ({ name, value: name })),
+          { name: '➕  新增 Provider', value: '__NEW__' },
+        ],
+      });
+      if (newProviderName === '__NEW__') {
+        newProviderName = await input({
+          message: '请输入 Provider 名称',
+          validate: (v) => (v && String(v).trim() ? true : '不能为空'),
+        });
+        newProviderName = String(newProviderName).trim();
+      }
+    } else {
+      newProviderName = await input({
+        message: '请输入 Provider 名称',
+        validate: (v) => (v && String(v).trim() ? true : '不能为空'),
+      });
+      newProviderName = String(newProviderName).trim();
+    }
+
+    const apiUrl = await input({
+      message: '请输入 API URL',
+      default: credentials[newProviderName]?.apiUrl || 'https://api.anthropic.com',
+      validate: (v) => (v && String(v).trim() ? true : '不能为空'),
+    });
+
+    const apiKey = await input({
+      message: '请输入 API Key',
+      default: credentials[newProviderName]?.apiKey || undefined,
+      validate: (v) => (v && String(v).trim() ? true : '不能为空'),
+    });
+
+    const modelsInput = await input({
+      message: '请输入 Models（逗号分隔）',
+      default: credentials[newProviderName]?.models?.join(', ') || undefined,
+    });
+    const models = modelsInput
+      ? modelsInput.split(',').map((m) => m.trim()).filter(Boolean)
+      : [];
+
+    // 确认保存
+    const ok = await confirm({
+      message: `将保存到 ${credPath}：\n  Provider: ${newProviderName}\n  API URL: ${apiUrl}\n  API Key: （已隐藏）\n  Models: ${models.length > 0 ? models.join(', ') : '（无）'}\n确认？`,
+      default: true,
+    });
+    if (!ok) {
+      console.log('已取消。');
+      process.exit(0);
+    }
+
+    // 读取或创建 credentials.json
+    let allCredentials = {};
+    if (fs.existsSync(credPath)) {
+      try {
+        const raw = fs.readFileSync(credPath, 'utf8');
+        allCredentials = JSON.parse(raw);
+        if (typeof allCredentials !== 'object' || allCredentials === null || Array.isArray(allCredentials)) {
+          allCredentials = {};
+        }
+      } catch {
+        allCredentials = {};
+      }
+    }
+
+    allCredentials[newProviderName] = {
+      apiUrl: apiUrl.trim(),
+      apiKey: apiKey.trim(),
+      ...(models.length > 0 ? { models } : {}),
+    };
+
+    // 确保目录存在
+    const credDir = path.dirname(credPath);
+    if (!fs.existsSync(credDir)) {
+      fs.mkdirSync(credDir, { recursive: true });
+    }
+
+    fs.writeFileSync(credPath, JSON.stringify(allCredentials, null, 2) + '\n', 'utf8');
+    console.log(`已保存凭据: ${credPath}`);
+
+    // 更新 credentials 并继续选择 model
+    credentials[newProviderName] = allCredentials[newProviderName];
+    provider = newProviderName;
+  }
 
   // 处理清空配置
   if (provider === CLEAR_CHOICE) {
