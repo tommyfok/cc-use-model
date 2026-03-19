@@ -1,6 +1,6 @@
 {
   "name": "cc-use-model",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "从 credentials.json 选择 provider/model 并写入 ~/.claude/settings.json",
   "type": "module",
   "main": "./bin/cli.mjs",
