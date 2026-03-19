@@ -30,6 +30,7 @@ cp credentials.json.example credentials.json
 | -------- | ------------------------------------------ |
 | `apiUrl` | 必填，Anthropic 兼容 API 地址              |
 | `apiKey` | 必填，令牌                                 |
+| `env`    | 可选，键值对象（value 必须为字符串）；一旦提供，将忽略 `apiUrl/apiKey`，改为把这些 env 键覆盖写入 `~/.claude/settings.json` 的 `env` 中 |
 | `models` | 可选，字符串数组；无则运行时手动输入 model |
 
 ## 使用
@@ -55,8 +56,9 @@ cc-use-model
 
 ## 行为说明
 
-- 会**保留** `settings.json` 里除上述三个 env 以外的字段（如 `skipDangerousModePermissionPrompt`）。
-- 其它 `env` 变量会保留，仅覆盖这三个键。
+- 会**保留** `settings.json` 里除 env 以外的字段（如 `skipDangerousModePermissionPrompt`）。
+- 使用普通 provider（`apiUrl/apiKey`）时：其它 `env` 变量会保留，仅覆盖 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`。
+- 使用 `env` provider 时：会覆盖写入 `env` 中提供的键，以及 `ANTHROPIC_MODEL`；并记录 `envKey`（写入过的 env 键列表），用于下次切换到无 `env` 的 provider 时自动清理这些键。
 
 ## 安全
 

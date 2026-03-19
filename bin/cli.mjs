@@ -47,11 +47,19 @@ function loadCredentials(filePath) {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) {
     throw new Error('credentials.json 根节点必须是对象，且每个 key 为一个 provider');
   }
-  const providers = Object.entries(data).filter(
-    ([, v]) => v && typeof v === 'object' && typeof v.apiUrl === 'string' && typeof v.apiKey === 'string'
-  );
+  const providers = Object.entries(data).filter(([, v]) => {
+    if (!v || typeof v !== 'object') return false;
+    const hasApi =
+      typeof v.apiUrl === 'string' && v.apiUrl.trim() && typeof v.apiKey === 'string' && v.apiKey.trim();
+    const hasEnv =
+      v.env &&
+      typeof v.env === 'object' &&
+      !Array.isArray(v.env) &&
+      Object.entries(v.env).every(([k, val]) => typeof k === 'string' && k && typeof val === 'string');
+    return Boolean(hasApi || hasEnv);
+  });
   if (providers.length === 0) {
-    throw new Error('未找到有效 provider：每项需包含 apiUrl、apiKey（字符串）');
+    throw new Error('未找到有效 provider：每项需包含 apiUrl+apiKey（字符串）或 env（对象，value 为字符串）');
   }
   return Object.fromEntries(providers);
 }
@@ -82,9 +90,14 @@ function normalizeBaseUrl(url) {
 function getCurrentClaudeSelection() {
   const s = loadOrInitSettings(settingsPathClaude());
   const env = s.env && typeof s.env === 'object' ? s.env : {};
+  const envKey = s.envKey;
   return {
     baseUrl: env.ANTHROPIC_BASE_URL,
     model: typeof env.ANTHROPIC_MODEL === 'string' ? env.ANTHROPIC_MODEL.trim() : '',
+    envKey:
+      Array.isArray(envKey) && envKey.every((k) => typeof k === 'string' && k.trim())
+        ? envKey.map((k) => String(k).trim())
+        : null,
   };
 }
 
@@ -152,20 +165,32 @@ async function main() {
     process.exit(1);
   }
 
-  const { baseUrl: currentBaseUrl, model: currentModel } = getCurrentClaudeSelection();
+  const { baseUrl: currentBaseUrl, model: currentModel, envKey: currentEnvKey } = getCurrentClaudeSelection();
   const currentUrlNorm = normalizeBaseUrl(currentBaseUrl);
 
   const providerKeys = orderCurrentFirst(Object.keys(credentials), (name) => {
+    const c = credentials[name];
+    if (c?.env && currentEnvKey) {
+      const keys = Object.keys(c.env).sort();
+      const cur = [...currentEnvKey].sort();
+      if (keys.length !== cur.length) return false;
+      return keys.every((k, i) => k === cur[i]);
+    }
     if (!currentUrlNorm) return false;
-    return normalizeBaseUrl(credentials[name].apiUrl) === currentUrlNorm;
+    if (!c?.apiUrl) return false;
+    return normalizeBaseUrl(c.apiUrl) === currentUrlNorm;
   });
 
   const provider = await select({
     message: '选择 Provider',
     choices: providerKeys.map((name) => {
+      const c = credentials[name];
       const isCur =
-        currentUrlNorm &&
-        normalizeBaseUrl(credentials[name].apiUrl) === currentUrlNorm;
+        (c?.env &&
+          currentEnvKey &&
+          Object.keys(c.env).length === currentEnvKey.length &&
+          Object.keys(c.env).every((k) => currentEnvKey.includes(k))) ||
+        (currentUrlNorm && c?.apiUrl && normalizeBaseUrl(c.apiUrl) === currentUrlNorm);
       return {
         name: isCur ? `${name} （当前选择）` : name,
         value: name,
@@ -201,10 +226,17 @@ async function main() {
     model = String(model).trim();
   }
 
-  const ok = await confirm({
-    message: `将写入 ~/.claude/settings.json：\n  ANTHROPIC_BASE_URL: ${cfg.apiUrl}\n  ANTHROPIC_MODEL: ${model}\n  ANTHROPIC_AUTH_TOKEN: （已隐藏）\n确认？`,
-    default: true,
-  });
+  let preview = '';
+  if (cfg.env) {
+    const envPairs = Object.entries(cfg.env)
+      .map(([k, v]) => `  ${k}: ${k.toLowerCase().includes('token') || k.toLowerCase().includes('key') ? '（已隐藏）' : v}`)
+      .join('\n');
+    preview = `将写入 ~/.claude/settings.json：\n${envPairs}\n  ANTHROPIC_MODEL: ${model}\n确认？`;
+  } else {
+    preview = `将写入 ~/.claude/settings.json：\n  ANTHROPIC_BASE_URL: ${cfg.apiUrl}\n  ANTHROPIC_MODEL: ${model}\n  ANTHROPIC_AUTH_TOKEN: （已隐藏）\n确认？`;
+  }
+
+  const ok = await confirm({ message: preview, default: true });
   if (!ok) {
     console.log('已取消。');
     process.exit(0);
@@ -219,12 +251,31 @@ async function main() {
   }
 
   const settings = loadOrInitSettings(settingsPath);
-  settings.env = {
-    ...(settings.env && typeof settings.env === 'object' ? settings.env : {}),
-    ANTHROPIC_AUTH_TOKEN: cfg.apiKey,
-    ANTHROPIC_BASE_URL: cfg.apiUrl,
-    ANTHROPIC_MODEL: model,
-  };
+  const env = settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env) ? settings.env : {};
+
+  // 切换 provider 时，清理旧 envKey 对应的 env 变量
+  if (Array.isArray(settings.envKey)) {
+    for (const k of settings.envKey) {
+      if (typeof k === 'string' && k in env) delete env[k];
+    }
+  }
+
+  if (cfg.env) {
+    // env provider：忽略 apiUrl/apiKey，覆盖写入对应 env 字段，并记录 envKey
+    for (const [k, v] of Object.entries(cfg.env)) {
+      env[k] = v;
+    }
+    env.ANTHROPIC_MODEL = model;
+    settings.envKey = Object.keys(cfg.env);
+  } else {
+    // 非 env provider：删除旧 envKey，并按原逻辑写入 ANTHROPIC_*
+    if ('envKey' in settings) delete settings.envKey;
+    env.ANTHROPIC_AUTH_TOKEN = cfg.apiKey;
+    env.ANTHROPIC_BASE_URL = cfg.apiUrl;
+    env.ANTHROPIC_MODEL = model;
+  }
+
+  settings.env = env;
 
   settings.model = model;
 
