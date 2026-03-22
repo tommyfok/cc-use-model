@@ -8,16 +8,35 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { select, input, confirm } from '@inquirer/prompts';
 
+// 用户取消操作的错误类
+class UserCancelError extends Error {
+  constructor(message = '用户取消操作') {
+    super(message);
+    this.name = 'UserCancelError';
+  }
+}
+
+// 优雅退出处理
+function gracefulExit() {
+  console.log('\n已退出。');
+  process.exit(0);
+}
+
+// 捕获 Ctrl+C
+process.on('SIGINT', gracefulExit);
+
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function parseArgs(argv) {
-  const args = { file: null };
+  const args = { file: null, command: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-f' || a === '--file') {
       args.file = argv[++i];
     } else if (a === '-h' || a === '--help') {
       args.help = true;
+    } else if (a === 'apply-envs') {
+      args.command = 'apply-envs';
     }
   }
   return args;
@@ -25,8 +44,13 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`
-用法: cc-use-model [选项]
+用法: cc-use-model [选项] [命令]
 
+命令:
+  apply-envs          输出 shell 环境变量设置语句，配合 eval 使用：
+                     eval "$(cc-use-model apply-envs)"
+
+选项:
   -f, --file <path>   凭据文件路径（见下方默认查找顺序）
   -h, --help          显示帮助
 
@@ -126,10 +150,57 @@ function resolveCredentialsPathAuto() {
   return null;
 }
 
+/** 获取当前配置的环境变量，用于 apply-envs 命令 */
+function getCurrentEnvForExport() {
+  const s = loadOrInitSettings(settingsPathClaude());
+  const env = s.env && typeof s.env === 'object' ? s.env : {};
+  return env;
+}
+
+/** 输出 shell export 语句 */
+function printExportStatements() {
+  const env = getCurrentEnvForExport();
+  const exportLines = [];
+
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value === 'string') {
+      // 对值进行转义处理，防止特殊字符问题
+      const escapedValue = value.replace(/'/g, "'\\''");
+      exportLines.push(`export ${key}='${escapedValue}'`);
+    }
+  }
+
+  if (exportLines.length === 0) {
+    console.error('# 无环境变量需要设置');
+    process.exit(1);
+  }
+
+  console.log(exportLines.join('\n'));
+}
+
+/** 包装 inquirer 操作，捕获取消操作 */
+async function safePrompt(promise) {
+  try {
+    return await promise;
+  } catch (err) {
+    // @inquirer/prompts 在用户按 esc/ctrl+c 时会抛出错误
+    if (err && (err.name === 'ExitPromptError' || err.message?.includes('User force closed the prompt'))) {
+      gracefulExit();
+    }
+    throw err;
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
     printHelp();
+    process.exit(0);
+  }
+
+  // 处理 apply-envs 命令
+  if (args.command === 'apply-envs') {
+    printExportStatements();
     process.exit(0);
   }
 
@@ -189,7 +260,7 @@ async function main() {
   if (noCredentialsFile) {
     provider = ADD_CHOICE;
   } else {
-    provider = await select({
+    provider = await safePrompt(select({
       message: '选择 Provider',
       choices: [
         ...providerKeys.map((name) => {
@@ -208,7 +279,7 @@ async function main() {
         { name: '➕  增加配置', value: ADD_CHOICE },
         { name: '🗑️  清空配置（恢复无 API Key 状态）', value: CLEAR_CHOICE },
       ],
-    });
+    }));
   }
 
   // 处理增加配置
@@ -216,53 +287,53 @@ async function main() {
     // 让用户填写 provider 名称，如果已有凭据则提供选择
     let newProviderName;
     if (Object.keys(credentials).length > 0) {
-      newProviderName = await select({
+      newProviderName = await safePrompt(select({
         message: '选择或输入 Provider 名称',
         choices: [
           ...Object.keys(credentials).map((name) => ({ name, value: name })),
           { name: '➕  新增 Provider', value: '__NEW__' },
         ],
-      });
+      }));
       if (newProviderName === '__NEW__') {
-        newProviderName = await input({
+        newProviderName = await safePrompt(input({
           message: '请输入 Provider 名称',
           validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-        });
+        }));
         newProviderName = String(newProviderName).trim();
       }
     } else {
-      newProviderName = await input({
+      newProviderName = await safePrompt(input({
         message: '请输入 Provider 名称',
         validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-      });
+      }));
       newProviderName = String(newProviderName).trim();
     }
 
-    const apiUrl = await input({
+    const apiUrl = await safePrompt(input({
       message: '请输入 API URL',
       default: credentials[newProviderName]?.apiUrl || 'https://api.anthropic.com',
       validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-    });
+    }));
 
-    const apiKey = await input({
+    const apiKey = await safePrompt(input({
       message: '请输入 API Key',
       default: credentials[newProviderName]?.apiKey || undefined,
       validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-    });
+    }));
 
-    const modelsInput = await input({
+    const modelsInput = await safePrompt(input({
       message: '请输入 Models（逗号分隔）',
       default: credentials[newProviderName]?.models?.join(', ') || undefined,
-    });
+    }));
     const models = modelsInput
       ? modelsInput.split(',').map((m) => m.trim()).filter(Boolean)
       : [];
 
     // 确认保存
-    const ok = await confirm({
+    const ok = await safePrompt(confirm({
       message: `将保存到 ${credPath}：\n  Provider: ${newProviderName}\n  API URL: ${apiUrl}\n  API Key: （已隐藏）\n  Models: ${models.length > 0 ? models.join(', ') : '（无）'}\n确认？`,
       default: true,
-    });
+    }));
     if (!ok) {
       console.log('已取消。');
       process.exit(0);
@@ -304,10 +375,10 @@ async function main() {
 
   // 处理清空配置
   if (provider === CLEAR_CHOICE) {
-    const ok = await confirm({
+    const ok = await safePrompt(confirm({
       message: '将清空 ~/.claude/settings.json 中的 env 配置（ANTHROPIC_AUTH_TOKEN、ANTHROPIC_BASE_URL、ANTHROPIC_MODEL 等）\n确认？',
       default: true,
-    });
+    }));
     if (!ok) {
       console.log('已取消。');
       process.exit(0);
@@ -355,23 +426,23 @@ async function main() {
       cfg.models.map((m) => String(m)),
       (m) => Boolean(currentModel && m === currentModel)
     );
-    model = await select({
+    model = await safePrompt(select({
       message: `选择 Model（${provider}）`,
       choices: modelsOrdered.map((m) => ({
         name: currentModel && m === currentModel ? `${m} （当前选择）` : m,
         value: m,
       })),
-    });
+    }));
   } else {
     const hint =
       currentModel && (!cfg.models || cfg.models.length === 0)
         ? `（回车沿用当前：${currentModel}）`
         : '';
-    model = await input({
+    model = await safePrompt(input({
       message: `该 provider 未配置 models，请输入 model 名称${hint}`,
       default: currentModel || undefined,
       validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-    });
+    }));
     model = String(model).trim();
   }
 
@@ -385,7 +456,7 @@ async function main() {
     preview = `将写入 ~/.claude/settings.json：\n  ANTHROPIC_BASE_URL: ${cfg.apiUrl}\n  ANTHROPIC_MODEL: ${model}\n  ANTHROPIC_AUTH_TOKEN: （已隐藏）\n确认？`;
   }
 
-  const ok = await confirm({ message: preview, default: true });
+  const ok = await safePrompt(confirm({ message: preview, default: true }));
   if (!ok) {
     console.log('已取消。');
     process.exit(0);
@@ -433,6 +504,10 @@ async function main() {
 }
 
 main().catch((err) => {
+  // 用户取消操作，正常退出
+  if (err instanceof UserCancelError) {
+    gracefulExit();
+  }
   console.error(err);
   process.exit(1);
 });
