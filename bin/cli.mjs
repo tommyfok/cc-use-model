@@ -10,14 +10,22 @@ import { select, input, confirm } from '@inquirer/prompts';
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+// 信号处理：Ctrl+C / ESC 优雅退出
+process.on('SIGINT', () => {
+  console.log('\n已取消。');
+  process.exit(0);
+});
+
 function parseArgs(argv) {
-  const args = { file: null };
+  const args = { file: null, command: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-f' || a === '--file') {
       args.file = argv[++i];
     } else if (a === '-h' || a === '--help') {
       args.help = true;
+    } else if (!args.command && !a.startsWith('-')) {
+      args.command = a;
     }
   }
   return args;
@@ -25,8 +33,12 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`
-用法: cc-use-model [选项]
+用法: cc-use-model [命令] [选项]
 
+命令:
+  apply-envs          输出环境变量 export 语句（用于 eval $(cc-use-model apply-envs)）
+
+选项:
   -f, --file <path>   凭据文件路径（见下方默认查找顺序）
   -h, --help          显示帮助
 
@@ -375,6 +387,25 @@ async function main() {
     model = String(model).trim();
   }
 
+  // 处理 apply-envs 命令：直接输出 export 语句
+  if (args.command === 'apply-envs') {
+    const exports = [];
+    if (cfg.env) {
+      // env provider：输出所有 env 变量
+      for (const [k, v] of Object.entries(cfg.env)) {
+        exports.push(`export ${k}="${escapeShellValue(v)}"`);
+      }
+      exports.push(`export ANTHROPIC_MODEL="${escapeShellValue(model)}"`);
+    } else {
+      // 标准 provider
+      exports.push(`export ANTHROPIC_AUTH_TOKEN="${escapeShellValue(cfg.apiKey)}"`);
+      exports.push(`export ANTHROPIC_BASE_URL="${escapeShellValue(cfg.apiUrl)}"`);
+      exports.push(`export ANTHROPIC_MODEL="${escapeShellValue(model)}"`);
+    }
+    console.log(exports.join('\n'));
+    process.exit(0);
+  }
+
   let preview = '';
   if (cfg.env) {
     const envPairs = Object.entries(cfg.env)
@@ -430,6 +461,12 @@ async function main() {
 
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
   console.log(`已更新: ${settingsPath}`);
+}
+
+/** 转义 shell 变量值中的特殊字符 */
+function escapeShellValue(value) {
+  if (!value) return '';
+  return value.replace(/["\\$`]/g, '\\$&');
 }
 
 main().catch((err) => {
