@@ -7,17 +7,53 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { select, input, confirm } from '@inquirer/prompts';
+import readline from 'node:readline';
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/** 检查是否按下了 ctrl+c 或 esc */
+function setupCancelHandler() {
+  readline.emitKeypressEvents(process.stdin);
+  if (process.stdin.isRaw) {
+    process.stdin.isRaw = false;
+  }
+  process.stdin.on('keypress', (str, key) => {
+    if (key.ctrl && key.name === 'c') {
+      console.log('\n已取消。');
+      process.exit(0);
+    }
+    if (key.name === 'escape') {
+      console.log('\n已取消。');
+      process.exit(0);
+    }
+  });
+}
+
+/** 包装 inquirer prompt 以处理取消操作 */
+async function safePrompt(promptFn, ...args) {
+  try {
+    return await promptFn(...args);
+  } catch (e) {
+    if (e.isTtyError) {
+      // 忽略 TTY 错误
+    } else if (e.message === 'User force closed prompt with 0 null' || e.message?.includes('cancel')) {
+      console.log('\n已取消。');
+      process.exit(0);
+    }
+    throw e;
+  }
+}
+
 function parseArgs(argv) {
-  const args = { file: null };
+  const args = { file: null, applyEnvs: false };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-f' || a === '--file') {
       args.file = argv[++i];
     } else if (a === '-h' || a === '--help') {
       args.help = true;
+    } else if (a === 'apply-envs') {
+      args.applyEnvs = true;
     }
   }
   return args;
@@ -25,10 +61,13 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`
-用法: cc-use-model [选项]
+用法: cc-use-model [选项] [命令]
 
   -f, --file <path>   凭据文件路径（见下方默认查找顺序）
   -h, --help          显示帮助
+
+  命令:
+    apply-envs         直接在当前 shell 进程中设置环境变量（需 source）
 
   未指定 -f 时依次尝试:
     1) 环境变量 CC_USE_MODEL_CREDENTIALS
@@ -133,6 +172,36 @@ async function main() {
     process.exit(0);
   }
 
+  // apply-envs 命令：直接在当前 shell 进程中设置环境变量
+  if (args.applyEnvs) {
+    setupCancelHandler();
+    const settingsPath = settingsPathClaude();
+    const settings = loadOrInitSettings(settingsPath);
+    const env = settings.env && typeof settings.env === 'object' ? settings.env : {};
+
+    // 直接输出 export 命令
+    const exports = [];
+    for (const [k, v] of Object.entries(env)) {
+      if (typeof v === 'string') {
+        // 转义单引号
+        const escaped = v.replace(/'/g, "'\\''");
+        exports.push(`export ${k}='${escaped}'`);
+      }
+    }
+
+    if (exports.length === 0) {
+      console.error('未找到已保存的环境变量配置。请先运行 cc-use-model 选择 provider。');
+      process.exit(1);
+    }
+
+    console.log('# 请运行以下命令设置环境变量（复制粘贴或 source）：');
+    console.log(exports.join('\n'));
+    process.exit(0);
+  }
+
+  // 启用 ctrl+c / esc 退出
+  setupCancelHandler();
+
   let credPath;
   let noCredentialsFile = false;
   if (args.file) {
@@ -189,7 +258,7 @@ async function main() {
   if (noCredentialsFile) {
     provider = ADD_CHOICE;
   } else {
-    provider = await select({
+    provider = await safePrompt(select, {
       message: '选择 Provider',
       choices: [
         ...providerKeys.map((name) => {
@@ -216,7 +285,7 @@ async function main() {
     // 让用户填写 provider 名称，如果已有凭据则提供选择
     let newProviderName;
     if (Object.keys(credentials).length > 0) {
-      newProviderName = await select({
+      newProviderName = await safePrompt(select, {
         message: '选择或输入 Provider 名称',
         choices: [
           ...Object.keys(credentials).map((name) => ({ name, value: name })),
@@ -224,33 +293,33 @@ async function main() {
         ],
       });
       if (newProviderName === '__NEW__') {
-        newProviderName = await input({
+        newProviderName = await safePrompt(input, {
           message: '请输入 Provider 名称',
           validate: (v) => (v && String(v).trim() ? true : '不能为空'),
         });
         newProviderName = String(newProviderName).trim();
       }
     } else {
-      newProviderName = await input({
+      newProviderName = await safePrompt(input, {
         message: '请输入 Provider 名称',
         validate: (v) => (v && String(v).trim() ? true : '不能为空'),
       });
       newProviderName = String(newProviderName).trim();
     }
 
-    const apiUrl = await input({
+    const apiUrl = await safePrompt(input, {
       message: '请输入 API URL',
       default: credentials[newProviderName]?.apiUrl || 'https://api.anthropic.com',
       validate: (v) => (v && String(v).trim() ? true : '不能为空'),
     });
 
-    const apiKey = await input({
+    const apiKey = await safePrompt(input, {
       message: '请输入 API Key',
       default: credentials[newProviderName]?.apiKey || undefined,
       validate: (v) => (v && String(v).trim() ? true : '不能为空'),
     });
 
-    const modelsInput = await input({
+    const modelsInput = await safePrompt(input, {
       message: '请输入 Models（逗号分隔）',
       default: credentials[newProviderName]?.models?.join(', ') || undefined,
     });
@@ -259,7 +328,7 @@ async function main() {
       : [];
 
     // 确认保存
-    const ok = await confirm({
+    const ok = await safePrompt(confirm, {
       message: `将保存到 ${credPath}：\n  Provider: ${newProviderName}\n  API URL: ${apiUrl}\n  API Key: （已隐藏）\n  Models: ${models.length > 0 ? models.join(', ') : '（无）'}\n确认？`,
       default: true,
     });
@@ -304,7 +373,7 @@ async function main() {
 
   // 处理清空配置
   if (provider === CLEAR_CHOICE) {
-    const ok = await confirm({
+    const ok = await safePrompt(confirm, {
       message: '将清空 ~/.claude/settings.json 中的 env 配置（ANTHROPIC_AUTH_TOKEN、ANTHROPIC_BASE_URL、ANTHROPIC_MODEL 等）\n确认？',
       default: true,
     });
@@ -355,7 +424,7 @@ async function main() {
       cfg.models.map((m) => String(m)),
       (m) => Boolean(currentModel && m === currentModel)
     );
-    model = await select({
+    model = await safePrompt(select, {
       message: `选择 Model（${provider}）`,
       choices: modelsOrdered.map((m) => ({
         name: currentModel && m === currentModel ? `${m} （当前选择）` : m,
@@ -367,7 +436,7 @@ async function main() {
       currentModel && (!cfg.models || cfg.models.length === 0)
         ? `（回车沿用当前：${currentModel}）`
         : '';
-    model = await input({
+    model = await safePrompt(input, {
       message: `该 provider 未配置 models，请输入 model 名称${hint}`,
       default: currentModel || undefined,
       validate: (v) => (v && String(v).trim() ? true : '不能为空'),
@@ -385,7 +454,7 @@ async function main() {
     preview = `将写入 ~/.claude/settings.json：\n  ANTHROPIC_BASE_URL: ${cfg.apiUrl}\n  ANTHROPIC_MODEL: ${model}\n  ANTHROPIC_AUTH_TOKEN: （已隐藏）\n确认？`;
   }
 
-  const ok = await confirm({ message: preview, default: true });
+  const ok = await safePrompt(confirm, { message: preview, default: true });
   if (!ok) {
     console.log('已取消。');
     process.exit(0);
