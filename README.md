@@ -6,6 +6,10 @@
 
 凭据文件自动查找，支持多路径探测，也可通过参数或环境变量指定。
 
+## 环境要求
+
+- Node.js **18+**（见 `package.json` 的 `engines`）
+
 ## 安装
 
 ```bash
@@ -24,14 +28,17 @@ npx cc-use-model
 cp credentials.json.example credentials.json
 ```
 
-每个顶层 key 为一个 provider，结构：
+每个顶层 key 为一个 provider。每个 provider **二选一**：
 
-| 字段     | 说明                                       |
-| -------- | ------------------------------------------ |
-| `apiUrl` | 必填，Anthropic 兼容 API 地址              |
-| `apiKey` | 必填，令牌                                 |
-| `env`    | 可选，键值对象（value 必须为字符串）；一旦提供，将忽略 `apiUrl/apiKey`，改为把这些 env 键覆盖写入 `~/.claude/settings.json` 的 `env` 中 |
-| `models` | 可选，字符串数组；无则运行时手动输入 model |
+- **普通 provider**：提供 `apiUrl` + `apiKey`（均为非空字符串）
+- **`env` provider**：提供 `env` 对象（键与非空字符串值）；此时忽略该条目的 `apiUrl` / `apiKey`
+
+| 字段     | 说明                                                                 |
+| -------- | -------------------------------------------------------------------- |
+| `apiUrl` | 与 `apiKey` 成对使用：Anthropic 兼容 API 地址                         |
+| `apiKey` | 与 `apiUrl` 成对使用：令牌                                           |
+| `env`    | 可选替代上述二者：键值对象（value 必须为字符串）；把这些键写入 `~/.claude/settings.json` 的 `env` |
+| `models` | 可选，字符串数组；无则运行时手动输入 model                           |
 
 ## 使用
 
@@ -45,6 +52,9 @@ cc-use-model -f /path/to/credentials.json
 # 通过环境变量指定
 export CC_USE_MODEL_CREDENTIALS=/path/to/credentials.json
 cc-use-model
+
+# 查看帮助
+cc-use-model -h
 ```
 
 **凭据查找顺序**（未指定 `-f` 时）：
@@ -54,12 +64,24 @@ cc-use-model
 3. 本工具所在目录下的 `credentials.json`（`npm link` 后从任意目录执行都会读到）
 4. `~/.config/cc-use-model/credentials.json`
 
+### 子命令 `apply-envs`
+
+根据当前 `~/.claude/settings.json` 中的配置，向标准输出打印 `export VAR='...'` 行，便于在当前 shell 中生效（例如配合 `eval`）。**不读取** `credentials.json`。
+
+```bash
+cc-use-model apply-envs
+eval "$(cc-use-model apply-envs)"
+```
+
+会输出 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`，以及此前由 `env` provider 写入且记录在 `envKey` 中的其它变量。若当前无任何配置，命令会以非零退出码结束。
+
 ## 行为说明
 
-- 会**保留** `settings.json` 里除 env 以外的字段（如 `skipDangerousModePermissionPrompt`）。
-- 使用普通 provider（`apiUrl/apiKey`）时：其它 `env` 变量会保留，仅覆盖 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`。
+- 会**保留** `settings.json` 里除本次写入涉及的字段外的其它顶层字段（如 `skipDangerousModePermissionPrompt`）。
+- 每次选定 model 后，除合并 `env` 外，还会将顶层 **`model`** 设为当前选择的 model。
+- 使用普通 provider（`apiUrl` / `apiKey`）时：其它 `env` 变量会保留，仅覆盖 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`。
 - 使用 `env` provider 时：会覆盖写入 `env` 中提供的键，以及 `ANTHROPIC_MODEL`；并记录 `envKey`（写入过的 env 键列表），用于下次切换到无 `env` 的 provider 时自动清理这些键。
-- 选择 **清空配置** 选项时：会清空 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL` 以及之前通过 `env` provider 写入的所有键，恢复到无 API Key 状态。
+- 选择 **清空配置** 选项时：会删除 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`、顶层 `model`，以及之前通过 `env` provider 写入并由 `envKey` 记录的所有键，恢复到无 API Key 状态。
 
 ## 安全
 
@@ -76,6 +98,10 @@ MIT
 Interactively select provider and model for Claude Code, automatically writing configuration to `~/.claude/settings.json`.
 
 Credentials file is auto-discovered across multiple paths, or can be specified via flag or environment variable.
+
+## Requirements
+
+- **Node.js 18+** (see `engines` in `package.json`)
 
 ## Installation
 
@@ -95,13 +121,17 @@ Copy the example and fill in:
 cp credentials.json.example credentials.json
 ```
 
-Each top-level key is a provider with the following structure:
+Each top-level key is a provider. For each provider, use **one of**:
 
-| Field    | Description                                    |
-| -------- | ---------------------------------------------- |
-| `apiUrl` | Required, Anthropic-compatible API endpoint     |
-| `apiKey` | Required, authentication token                  |
-| `models` | Optional, string array; if omitted, input model manually at runtime |
+- **Standard provider**: `apiUrl` + `apiKey` (both non-empty strings)
+- **`env` provider**: an `env` object (string keys and non-empty string values); `apiUrl` / `apiKey` on that entry are ignored
+
+| Field    | Description |
+| -------- | ----------- |
+| `apiUrl` | Used with `apiKey`: Anthropic-compatible API endpoint |
+| `apiKey` | Used with `apiUrl`: authentication token |
+| `env`    | Alternative to the pair above: key/value object (values must be strings); keys are written into `env` in `~/.claude/settings.json` |
+| `models` | Optional string array; if omitted, enter the model name interactively at runtime |
 
 ## Usage
 
@@ -115,20 +145,36 @@ cc-use-model -f /path/to/credentials.json
 # Via environment variable
 export CC_USE_MODEL_CREDENTIALS=/path/to/credentials.json
 cc-use-model
+
+# Help
+cc-use-model -h
 ```
 
-**Credentials lookup order** (when `-f` not specified):
+**Credentials lookup order** (when `-f` is not specified):
 
-1. File pointed by `CC_USE_MODEL_CREDENTIALS` environment variable
-2. `./credentials.json` in current directory
-3. `credentials.json` in the tool's directory
+1. File pointed to by `CC_USE_MODEL_CREDENTIALS`
+2. `./credentials.json` in the current working directory
+3. `credentials.json` next to the installed tool (useful with `npm link`)
 4. `~/.config/cc-use-model/credentials.json`
+
+### Subcommand `apply-envs`
+
+Prints `export VAR='...'` lines to stdout from the current `~/.claude/settings.json`, so you can load them into your shell (e.g. with `eval`). Does **not** read `credentials.json`.
+
+```bash
+cc-use-model apply-envs
+eval "$(cc-use-model apply-envs)"
+```
+
+Outputs `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and any other variables previously written by an `env` provider and listed in `envKey`. Exits with a non-zero status if nothing is configured.
 
 ## Behavior
 
-- Preserves all existing fields in `settings.json` (e.g., `skipDangerousModePermissionPrompt`)
-- Preserves other `env` variables, only overwrites `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and `ANTHROPIC_MODEL`
-- Selecting **Clear Configuration** will remove `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` and any keys written by `env` providers, restoring to no API key state
+- Preserves other top-level fields in `settings.json` (e.g. `skipDangerousModePermissionPrompt`) that are not part of this update.
+- After you pick a model, sets the top-level **`model`** field to that choice in addition to merging `env`.
+- **Standard provider** (`apiUrl` / `apiKey`): keeps other `env` entries; only overwrites `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and `ANTHROPIC_MODEL`.
+- **`env` provider**: writes the keys from `env` plus `ANTHROPIC_MODEL`; stores `envKey` (list of keys from that provider) so switching back to a standard provider can remove those keys automatically.
+- **Clear configuration**: removes `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, top-level `model`, and all keys previously written via `env` providers (as tracked by `envKey`), restoring a no–API-key state.
 
 ## Security
 
