@@ -5,19 +5,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { select, input, confirm } from '@inquirer/prompts';
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function parseArgs(argv) {
-  const args = { file: null };
+  const args = { file: null, command: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-f' || a === '--file') {
       args.file = argv[++i];
     } else if (a === '-h' || a === '--help') {
       args.help = true;
+    } else if (a === 'apply-envs') {
+      args.command = 'apply-envs';
     }
   }
   return args;
@@ -25,8 +28,12 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`
-用法: cc-use-model [选项]
+用法: cc-use-model [命令] [选项]
 
+命令:
+  apply-envs          输出当前配置的环境变量 export 语句，供 eval 执行
+
+选项:
   -f, --file <path>   凭据文件路径（见下方默认查找顺序）
   -h, --help          显示帮助
 
@@ -35,6 +42,11 @@ function printHelp() {
     2) 当前目录 ./credentials.json
     3) 本工具安装目录下的 credentials.json（npm link 时即项目根）
     4) ~/.config/cc-use-model/credentials.json
+
+示例:
+  cc-use-model                  交互选择 provider/model 并写入配置
+  cc-use-model apply-envs       输出当前配置的环境变量（用于 eval）
+  eval \$(cc-use-model apply-envs)  在当前 shell 中设置环境变量
 
 会交互选择 provider 与 model，并合并写入 ~/.claude/settings.json 中的 env：
   ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL
@@ -126,10 +138,104 @@ function resolveCredentialsPathAuto() {
   return null;
 }
 
+/** 输出当前配置的环境变量 export 语句 */
+function outputApplyEnvs() {
+  const settings = loadOrInitSettings(settingsPathClaude());
+  const env = settings.env && typeof settings.env === 'object' ? settings.env : {};
+  const envKey = settings.envKey;
+
+  const exports = [];
+
+  // 输出 ANTHROPIC 相关变量
+  if (env.ANTHROPIC_AUTH_TOKEN) {
+    exports.push(`export ANTHROPIC_AUTH_TOKEN='${env.ANTHROPIC_AUTH_TOKEN.replace(/'/g, "'\\''")}'`);
+  }
+  if (env.ANTHROPIC_BASE_URL) {
+    exports.push(`export ANTHROPIC_BASE_URL='${env.ANTHROPIC_BASE_URL.replace(/'/g, "'\\''")}'`);
+  }
+  if (env.ANTHROPIC_MODEL) {
+    exports.push(`export ANTHROPIC_MODEL='${env.ANTHROPIC_MODEL.replace(/'/g, "'\\''")}'`);
+  }
+
+  // 输出 envKey 对应的其他变量
+  if (Array.isArray(envKey)) {
+    for (const k of envKey) {
+      if (k in env && !k.startsWith('ANTHROPIC_')) {
+        exports.push(`export ${k}='${String(env[k]).replace(/'/g, "'\\''")}'`);
+      }
+    }
+  }
+
+  if (exports.length === 0) {
+    console.error('当前无配置，请先运行 cc-use-model 进行配置');
+    process.exit(1);
+  }
+
+  console.log(exports.join('\n'));
+}
+
+/** 全局 escape 键监听器 */
+let escapePressed = false;
+let currentAbortController = null;
+
+function setupEscapeListener() {
+  if (!process.stdin.isTTY) return;
+
+  // 使用 readline 的 keypress 接口
+  readline.emitKeypressEvents(process.stdin);
+
+  const handler = (char, key) => {
+    if (key && key.name === 'escape') {
+      escapePressed = true;
+      if (currentAbortController) {
+        currentAbortController.abort();
+      }
+    }
+  };
+
+  process.stdin.on('keypress', handler);
+}
+
+/** 处理用户取消操作（ctrl+c / esc） */
+function handleCancel() {
+  console.log('\n已取消。');
+  process.exit(0);
+}
+
+/** 包装 inquirer 操作，处理取消信号 */
+async function safePrompt(promiseFactory) {
+  if (escapePressed) {
+    handleCancel();
+  }
+
+  const ac = new AbortController();
+  currentAbortController = ac;
+
+  try {
+    return await promiseFactory(ac.signal);
+  } catch (e) {
+    if (e && (e.name === 'ExitPromptError' || e.name === 'AbortPromptError')) {
+      handleCancel();
+    }
+    throw e;
+  } finally {
+    currentAbortController = null;
+  }
+}
+
 async function main() {
+  // 设置 escape 键监听
+  setupEscapeListener();
+
   const args = parseArgs(process.argv);
   if (args.help) {
     printHelp();
+    process.exit(0);
+  }
+
+  // 处理 apply-envs 命令
+  if (args.command === 'apply-envs') {
+    outputApplyEnvs();
     process.exit(0);
   }
 
@@ -189,7 +295,7 @@ async function main() {
   if (noCredentialsFile) {
     provider = ADD_CHOICE;
   } else {
-    provider = await select({
+    provider = await safePrompt((signal) => select({
       message: '选择 Provider',
       choices: [
         ...providerKeys.map((name) => {
@@ -208,7 +314,7 @@ async function main() {
         { name: '➕  增加配置', value: ADD_CHOICE },
         { name: '🗑️  清空配置（恢复无 API Key 状态）', value: CLEAR_CHOICE },
       ],
-    });
+    }, { signal }));
   }
 
   // 处理增加配置
@@ -216,53 +322,53 @@ async function main() {
     // 让用户填写 provider 名称，如果已有凭据则提供选择
     let newProviderName;
     if (Object.keys(credentials).length > 0) {
-      newProviderName = await select({
+      newProviderName = await safePrompt((signal) => select({
         message: '选择或输入 Provider 名称',
         choices: [
           ...Object.keys(credentials).map((name) => ({ name, value: name })),
           { name: '➕  新增 Provider', value: '__NEW__' },
         ],
-      });
+      }, { signal }));
       if (newProviderName === '__NEW__') {
-        newProviderName = await input({
+        newProviderName = await safePrompt((signal) => input({
           message: '请输入 Provider 名称',
           validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-        });
+        }, { signal }));
         newProviderName = String(newProviderName).trim();
       }
     } else {
-      newProviderName = await input({
+      newProviderName = await safePrompt((signal) => input({
         message: '请输入 Provider 名称',
         validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-      });
+      }, { signal }));
       newProviderName = String(newProviderName).trim();
     }
 
-    const apiUrl = await input({
+    const apiUrl = await safePrompt((signal) => input({
       message: '请输入 API URL',
       default: credentials[newProviderName]?.apiUrl || 'https://api.anthropic.com',
       validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-    });
+    }, { signal }));
 
-    const apiKey = await input({
+    const apiKey = await safePrompt((signal) => input({
       message: '请输入 API Key',
       default: credentials[newProviderName]?.apiKey || undefined,
       validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-    });
+    }, { signal }));
 
-    const modelsInput = await input({
+    const modelsInput = await safePrompt((signal) => input({
       message: '请输入 Models（逗号分隔）',
       default: credentials[newProviderName]?.models?.join(', ') || undefined,
-    });
+    }, { signal }));
     const models = modelsInput
       ? modelsInput.split(',').map((m) => m.trim()).filter(Boolean)
       : [];
 
     // 确认保存
-    const ok = await confirm({
+    const ok = await safePrompt((signal) => confirm({
       message: `将保存到 ${credPath}：\n  Provider: ${newProviderName}\n  API URL: ${apiUrl}\n  API Key: （已隐藏）\n  Models: ${models.length > 0 ? models.join(', ') : '（无）'}\n确认？`,
       default: true,
-    });
+    }, { signal }));
     if (!ok) {
       console.log('已取消。');
       process.exit(0);
@@ -304,10 +410,10 @@ async function main() {
 
   // 处理清空配置
   if (provider === CLEAR_CHOICE) {
-    const ok = await confirm({
+    const ok = await safePrompt((signal) => confirm({
       message: '将清空 ~/.claude/settings.json 中的 env 配置（ANTHROPIC_AUTH_TOKEN、ANTHROPIC_BASE_URL、ANTHROPIC_MODEL 等）\n确认？',
       default: true,
-    });
+    }, { signal }));
     if (!ok) {
       console.log('已取消。');
       process.exit(0);
@@ -355,23 +461,23 @@ async function main() {
       cfg.models.map((m) => String(m)),
       (m) => Boolean(currentModel && m === currentModel)
     );
-    model = await select({
+    model = await safePrompt((signal) => select({
       message: `选择 Model（${provider}）`,
       choices: modelsOrdered.map((m) => ({
         name: currentModel && m === currentModel ? `${m} （当前选择）` : m,
         value: m,
       })),
-    });
+    }, { signal }));
   } else {
     const hint =
       currentModel && (!cfg.models || cfg.models.length === 0)
         ? `（回车沿用当前：${currentModel}）`
         : '';
-    model = await input({
+    model = await safePrompt((signal) => input({
       message: `该 provider 未配置 models，请输入 model 名称${hint}`,
       default: currentModel || undefined,
       validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-    });
+    }, { signal }));
     model = String(model).trim();
   }
 
@@ -385,7 +491,7 @@ async function main() {
     preview = `将写入 ~/.claude/settings.json：\n  ANTHROPIC_BASE_URL: ${cfg.apiUrl}\n  ANTHROPIC_MODEL: ${model}\n  ANTHROPIC_AUTH_TOKEN: （已隐藏）\n确认？`;
   }
 
-  const ok = await confirm({ message: preview, default: true });
+  const ok = await safePrompt((signal) => confirm({ message: preview, default: true }, { signal }));
   if (!ok) {
     console.log('已取消。');
     process.exit(0);
