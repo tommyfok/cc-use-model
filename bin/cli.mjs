@@ -12,11 +12,13 @@ import { select, input, confirm } from '@inquirer/prompts';
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function parseArgs(argv) {
-  const args = { file: null, command: null };
+  const args = { file: null, command: null, shell: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-f' || a === '--file') {
       args.file = argv[++i];
+    } else if (a === '--shell') {
+      args.shell = argv[++i];
     } else if (a === '-h' || a === '--help') {
       args.help = true;
     } else if (a === 'apply-envs') {
@@ -31,11 +33,13 @@ function printHelp() {
 用法: cc-use-model [命令] [选项]
 
 命令:
-  apply-envs          输出当前配置的环境变量 export 语句，供 eval 执行
+  apply-envs          输出当前配置的环境变量语句，供当前 shell 执行
 
 选项:
-  -f, --file <path>   凭据文件路径（见下方默认查找顺序）
-  -h, --help          显示帮助
+  -f, --file <path>     凭据文件路径（见下方默认查找顺序）
+      --shell <type>    指定 shell 类型：bash / zsh / powershell / cmd
+                        （默认自动检测）
+  -h, --help            显示帮助
 
   未指定 -f 时依次尝试:
     1) 环境变量 CC_USE_MODEL_CREDENTIALS
@@ -44,9 +48,10 @@ function printHelp() {
     4) ~/.config/cc-use-model/credentials.json
 
 示例:
-  cc-use-model                  交互选择 provider/model 并写入配置
-  cc-use-model apply-envs       输出当前配置的环境变量（用于 eval）
-  eval \$(cc-use-model apply-envs)  在当前 shell 中设置环境变量
+  cc-use-model                           交互选择 provider/model 并写入配置
+  eval \$(cc-use-model apply-envs)          bash/zsh: 设置环境变量
+  cc-use-model apply-envs | Invoke-Expression  PowerShell: 设置环境变量
+  cc-use-model apply-envs --shell cmd     cmd: 输出 set 语句
 
 会交互选择 provider 与 model，并合并写入 ~/.claude/settings.json 中的 env：
   ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL
@@ -138,40 +143,74 @@ function resolveCredentialsPathAuto() {
   return null;
 }
 
-/** 输出当前配置的环境变量 export 语句 */
-function outputApplyEnvs() {
+/** 检测当前 shell 类型 */
+function detectShell(shellArg) {
+  const validShells = ['bash', 'zsh', 'powershell', 'cmd'];
+  if (shellArg) {
+    const s = shellArg.toLowerCase();
+    if (validShells.includes(s)) return s;
+    console.error(`不支持的 shell: ${shellArg}，支持: ${validShells.join(', ')}`);
+    process.exit(1);
+  }
+  // 优先级：SHELL 环境变量 → PSModulePath → 平台默认
+  if (process.env.SHELL) {
+    if (process.env.SHELL.includes('zsh')) return 'zsh';
+    return 'bash';
+  }
+  if (process.env.PSModulePath) return 'powershell';
+  if (process.platform === 'win32') return 'cmd';
+  return 'bash';
+}
+
+/** 根据 shell 类型格式化单条环境变量语句 */
+function formatEnvLine(shell, key, value) {
+  switch (shell) {
+    case 'bash':
+    case 'zsh':
+      return `export ${key}='${value.replace(/'/g, "'\\''")}'`;
+    case 'powershell':
+      return `$env:${key} = '${value.replace(/'/g, "''")}'`;
+    case 'cmd':
+      return `set ${key}=${value}`;
+    default:
+      return `export ${key}='${value.replace(/'/g, "'\\''")}'`;
+  }
+}
+
+/** 输出当前配置的环境变量语句 */
+function outputApplyEnvs(shell) {
   const settings = loadOrInitSettings(settingsPathClaude());
   const env = settings.env && typeof settings.env === 'object' ? settings.env : {};
   const envKey = settings.envKey;
 
-  const exports = [];
+  const lines = [];
 
   // 输出 ANTHROPIC 相关变量
   if (env.ANTHROPIC_AUTH_TOKEN) {
-    exports.push(`export ANTHROPIC_AUTH_TOKEN='${env.ANTHROPIC_AUTH_TOKEN.replace(/'/g, "'\\''")}'`);
+    lines.push(formatEnvLine(shell, 'ANTHROPIC_AUTH_TOKEN', env.ANTHROPIC_AUTH_TOKEN));
   }
   if (env.ANTHROPIC_BASE_URL) {
-    exports.push(`export ANTHROPIC_BASE_URL='${env.ANTHROPIC_BASE_URL.replace(/'/g, "'\\''")}'`);
+    lines.push(formatEnvLine(shell, 'ANTHROPIC_BASE_URL', env.ANTHROPIC_BASE_URL));
   }
   if (env.ANTHROPIC_MODEL) {
-    exports.push(`export ANTHROPIC_MODEL='${env.ANTHROPIC_MODEL.replace(/'/g, "'\\''")}'`);
+    lines.push(formatEnvLine(shell, 'ANTHROPIC_MODEL', env.ANTHROPIC_MODEL));
   }
 
   // 输出 envKey 对应的其他变量
   if (Array.isArray(envKey)) {
     for (const k of envKey) {
       if (k in env && !k.startsWith('ANTHROPIC_')) {
-        exports.push(`export ${k}='${String(env[k]).replace(/'/g, "'\\''")}'`);
+        lines.push(formatEnvLine(shell, k, String(env[k])));
       }
     }
   }
 
-  if (exports.length === 0) {
+  if (lines.length === 0) {
     console.error('当前无配置，请先运行 cc-use-model 进行配置');
     process.exit(1);
   }
 
-  console.log(exports.join('\n'));
+  console.log(lines.join('\n'));
 }
 
 /** 全局 escape 键监听器 */
@@ -235,7 +274,8 @@ async function main() {
 
   // 处理 apply-envs 命令
   if (args.command === 'apply-envs') {
-    outputApplyEnvs();
+    const shell = detectShell(args.shell);
+    outputApplyEnvs(shell);
     process.exit(0);
   }
 
