@@ -674,7 +674,9 @@ function applySettings(cfg, model) {
   console.log(`已更新: ${settingsPath}`);
 }
 
-/** 选择 Provider/Model 并应用到 settings.json；应用后返回 undefined（回到主菜单），返回 BACK 表示中途取消返回主菜单 */
+const APPLIED = '__APPLIED__';
+
+/** 选择 Provider/Model 并应用到 settings.json；应用成功返回 APPLIED，中途取消返回 BACK */
 async function selectAndApplyFlow(credentials, presetProvider = null) {
   if (Object.keys(credentials).length === 0) {
     console.log('当前没有任何 Provider，请先添加。');
@@ -754,8 +756,7 @@ async function selectAndApplyFlow(credentials, presetProvider = null) {
     }
 
     applySettings(cfg, model);
-    // 应用成功，不返回任何值（调用者不 process.exit，直接回到主菜单循环）
-    return;
+    return APPLIED;
   }
 }
 
@@ -896,8 +897,8 @@ async function main() {
         default: true,
       }, { signal }));
       if (useNow) {
-        await selectAndApplyFlow(credentials, newName);
-        // 成功应用后，进入主菜单循环
+        const result = await selectAndApplyFlow(credentials, newName);
+        if (result === APPLIED) process.exit(0);
       }
       continue;
     }
@@ -925,8 +926,8 @@ async function main() {
     if (action === 'exit') {
       process.exit(0);
     } else if (action === 'select') {
-      await selectAndApplyFlow(credentials);
-      // 回到主菜单，重新构建菜单选项（可能出现/消失清空选项）
+      const result = await selectAndApplyFlow(credentials);
+      if (result === APPLIED) process.exit(0);
     } else if (action === 'add') {
       const newName = await addProviderFlow(credentials, credPath);
       if (newName && newName !== BACK) {
@@ -935,8 +936,8 @@ async function main() {
           default: true,
         }, { signal }));
         if (useNow) {
-          await selectAndApplyFlow(credentials, newName);
-          // 回到主菜单
+          const result = await selectAndApplyFlow(credentials, newName);
+          if (result === APPLIED) process.exit(0);
         }
       }
     } else if (action === 'manage') {
