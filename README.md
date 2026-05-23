@@ -69,7 +69,8 @@ cc-use-model -h
 When run without a subcommand, the tool presents an interactive menu with:
 
 - All providers from `credentials.json` (current selection is highlighted)
-- **➕ Add configuration** — interactively add or update a provider entry and save it back to `credentials.json`
+- **➕ Add configuration** — interactively add a new provider (or overwrite an existing one) and save it back to `credentials.json`
+- **⚙️ Manage credentials** — list every provider in `credentials.json` with details (URL / type / models) and let you **edit** or **delete** each entry. Standard providers (`apiUrl` / `apiKey`) support full editing; `env` providers support editing the `models` field and deletion (edit the `env` object manually for advanced changes).
 - **🗑️ Clear configuration** — remove all API keys from `settings.json` and restore native Claude login credentials (see below)
 
 ### Subcommand `apply-envs`
@@ -193,7 +194,8 @@ cc-use-model -h
 不带子命令运行时，工具会弹出交互菜单，包含：
 
 - `credentials.json` 中的所有 provider（当前选中项会高亮）
-- **➕ 增加配置** — 交互式添加或更新 provider 条目并保存回 `credentials.json`
+- **➕ 增加配置** — 交互式新增 provider（或覆盖已有同名 provider）并保存回 `credentials.json`
+- **⚙️ 管理凭据（编辑 / 删除）** — 列出所有 provider 及其详情（URL / 类型 / models），可对每项执行**编辑**或**删除**。标准 provider（`apiUrl` / `apiKey`）支持完整编辑；`env` provider 支持编辑 `models` 字段及删除（如需修改 `env` 对象请手动编辑文件）
 - **🗑️ 清空配置（恢复无 API Key 状态）** — 清除 `settings.json` 中的 API Key，并自动恢复原生 Claude 登录凭据（见下方说明）
 
 ### 子命令 `apply-envs`

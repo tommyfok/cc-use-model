@@ -374,6 +374,150 @@ async function safePrompt(promiseFactory) {
   }
 }
 
+/** 判断 provider 是否为当前 settings.json 中正在使用的 */
+function isCurrentProvider(cfg, currentUrlNorm, currentEnvKey) {
+  if (cfg?.env && currentEnvKey) {
+    const keys = Object.keys(cfg.env).sort();
+    const cur = [...currentEnvKey].sort();
+    if (keys.length !== cur.length) return false;
+    return keys.every((k, i) => k === cur[i]);
+  }
+  if (!currentUrlNorm) return false;
+  if (!cfg?.apiUrl) return false;
+  return normalizeBaseUrl(cfg.apiUrl) === currentUrlNorm;
+}
+
+/** 把凭据对象持久化到磁盘 */
+function saveCredentials(credPath, credentials) {
+  const credDir = path.dirname(credPath);
+  if (!fs.existsSync(credDir)) {
+    fs.mkdirSync(credDir, { recursive: true });
+  }
+  fs.writeFileSync(credPath, JSON.stringify(credentials, null, 2) + '\n', 'utf8');
+}
+
+/** 管理凭据：列出 / 编辑 / 删除 */
+async function manageCredentials(credentials, credPath, { currentUrlNorm, currentEnvKey }) {
+  while (true) {
+    const names = Object.keys(credentials);
+    if (names.length === 0) {
+      console.log('凭据文件已无 provider，返回主菜单。');
+      return;
+    }
+
+    const BACK = '__BACK__';
+    const target = await safePrompt((signal) => select({
+      message: '管理凭据 — 选择要操作的 Provider',
+      choices: [
+        ...names.map((name) => {
+          const c = credentials[name];
+          const type = c.env ? '[env]' : '[api]';
+          const cur = isCurrentProvider(c, currentUrlNorm, currentEnvKey) ? ' （当前选择）' : '';
+          return { name: `${type} ${name}${cur}`, value: name };
+        }),
+        { name: '← 返回', value: BACK },
+      ],
+    }, { signal }));
+
+    if (target === BACK) return;
+
+    const cfg = credentials[target];
+
+    // 显示当前配置详情
+    console.log(`\n当前配置 - ${target}:`);
+    if (cfg.env) {
+      console.log(`  类型: env provider`);
+      for (const [k, v] of Object.entries(cfg.env)) {
+        const masked = k.toLowerCase().includes('token') || k.toLowerCase().includes('key')
+          ? '（已隐藏）'
+          : v;
+        console.log(`  env.${k}: ${masked}`);
+      }
+    } else {
+      console.log(`  类型: 标准 provider`);
+      console.log(`  apiUrl: ${cfg.apiUrl}`);
+      console.log(`  apiKey: ${cfg.apiKey ? '（已隐藏）' : '(未设置)'}`);
+    }
+    console.log(`  models: ${cfg.models && cfg.models.length > 0 ? cfg.models.join(', ') : '(无)'}\n`);
+
+    const op = await safePrompt((signal) => select({
+      message: `选择对 ${target} 的操作`,
+      choices: [
+        { name: '✏️  编辑', value: 'edit' },
+        { name: '🗑️  删除', value: 'delete' },
+        { name: '← 返回', value: 'back' },
+      ],
+    }, { signal }));
+
+    if (op === 'back') continue;
+
+    if (op === 'delete') {
+      const ok = await safePrompt((signal) => confirm({
+        message: `确认删除 Provider「${target}」？此操作仅修改 credentials.json，不会影响 ~/.claude/settings.json`,
+        default: false,
+      }, { signal }));
+      if (!ok) {
+        console.log('已取消。');
+        continue;
+      }
+      delete credentials[target];
+      saveCredentials(credPath, credentials);
+      console.log(`已删除: ${target}`);
+      continue;
+    }
+
+    if (op === 'edit') {
+      if (cfg.env) {
+        // env provider：仅支持编辑 models（env 字段较复杂，建议手动编辑文件）
+        console.log('注：env provider 的 env 字段请手动编辑文件，这里仅支持修改 models。');
+        const modelsInput = await safePrompt((signal) => input({
+          message: '请输入 Models（逗号分隔，留空清除）',
+          default: cfg.models?.join(', ') || '',
+        }, { signal }));
+        const models = modelsInput
+          ? modelsInput.split(',').map((m) => m.trim()).filter(Boolean)
+          : [];
+        const updated = { ...cfg };
+        if (models.length > 0) updated.models = models;
+        else delete updated.models;
+        credentials[target] = updated;
+        saveCredentials(credPath, credentials);
+        console.log(`已更新: ${target}`);
+        continue;
+      }
+
+      // 标准 provider：编辑 apiUrl / apiKey / models
+      const apiUrl = await safePrompt((signal) => input({
+        message: '请输入 API URL',
+        default: cfg.apiUrl,
+        validate: (v) => (v && String(v).trim() ? true : '不能为空'),
+      }, { signal }));
+
+      const apiKey = await safePrompt((signal) => input({
+        message: '请输入 API Key',
+        default: cfg.apiKey,
+        validate: (v) => (v && String(v).trim() ? true : '不能为空'),
+      }, { signal }));
+
+      const modelsInput = await safePrompt((signal) => input({
+        message: '请输入 Models（逗号分隔，留空清除）',
+        default: cfg.models?.join(', ') || '',
+      }, { signal }));
+      const models = modelsInput
+        ? modelsInput.split(',').map((m) => m.trim()).filter(Boolean)
+        : [];
+
+      credentials[target] = {
+        apiUrl: apiUrl.trim(),
+        apiKey: apiKey.trim(),
+        ...(models.length > 0 ? { models } : {}),
+      };
+      saveCredentials(credPath, credentials);
+      console.log(`已更新: ${target}`);
+    }
+  }
+}
+
 async function main() {
   // 设置 escape 键监听
   setupEscapeListener();
@@ -474,8 +618,9 @@ async function main() {
     return normalizeBaseUrl(c.apiUrl) === currentUrlNorm;
   });
 
-  // 特殊选项：增加配置、清空配置
+  // 特殊选项：增加配置、管理凭据、清空配置
   const ADD_CHOICE = '__ADD__';
+  const MANAGE_CHOICE = '__MANAGE__';
   const CLEAR_CHOICE = '__CLEAR__';
 
   // 如果没有凭据文件，直接进入增加配置流程
@@ -500,9 +645,16 @@ async function main() {
           };
         }),
         { name: '➕  增加配置', value: ADD_CHOICE },
+        { name: '⚙️  管理凭据（编辑 / 删除）', value: MANAGE_CHOICE },
         { name: '🗑️  清空配置（恢复无 API Key 状态）', value: CLEAR_CHOICE },
       ],
     }, { signal }));
+  }
+
+  // 处理管理凭据
+  if (provider === MANAGE_CHOICE) {
+    await manageCredentials(credentials, credPath, { currentUrlNorm, currentEnvKey });
+    process.exit(0);
   }
 
   // 处理增加配置
