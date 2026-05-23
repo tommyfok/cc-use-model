@@ -6,8 +6,117 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { select, input, confirm } from '@inquirer/prompts';
+
+const KEYCHAIN_SERVICE = 'Claude Code-credentials';
+const BACKUP_PATH = path.join(os.homedir(), '.config', 'cc-use-model', 'claude-native-credentials.backup.json');
+const LINUX_CRED_PATH = path.join(os.homedir(), '.claude', '.credentials.json');
+
+/** 读取本机原生 Claude 凭据（mac=Keychain / linux=文件）。读不到返回 null。 */
+function readNativeClaudeCredential() {
+  try {
+    if (process.platform === 'darwin') {
+      const out = execFileSync(
+        'security',
+        ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', os.userInfo().username, '-w'],
+        { stdio: ['ignore', 'pipe', 'ignore'] }
+      ).toString().trim();
+      return out || null;
+    }
+    if (process.platform === 'linux') {
+      if (fs.existsSync(LINUX_CRED_PATH)) {
+        return fs.readFileSync(LINUX_CRED_PATH, 'utf8');
+      }
+      return null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** 写回本机原生 Claude 凭据。返回是否成功。 */
+function writeNativeClaudeCredential(payload) {
+  try {
+    if (process.platform === 'darwin') {
+      execFileSync(
+        'security',
+        ['add-generic-password', '-U', '-s', KEYCHAIN_SERVICE, '-a', os.userInfo().username, '-w', payload],
+        { stdio: 'ignore' }
+      );
+      return true;
+    }
+    if (process.platform === 'linux') {
+      fs.mkdirSync(path.dirname(LINUX_CRED_PATH), { recursive: true });
+      fs.writeFileSync(LINUX_CRED_PATH, payload, { encoding: 'utf8', mode: 0o600 });
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/** 在切换到第三方 provider 之前自动备份原生凭据。 */
+function backupNativeCredentialIfNeeded() {
+  if (process.platform === 'win32') return;
+  const current = readNativeClaudeCredential();
+  if (!current) return;
+
+  let existingBackup = null;
+  if (fs.existsSync(BACKUP_PATH)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(BACKUP_PATH, 'utf8'));
+      if (raw && typeof raw.payload === 'string') existingBackup = raw.payload;
+    } catch {
+      existingBackup = null;
+    }
+  }
+  if (existingBackup === current) return;
+
+  try {
+    fs.mkdirSync(path.dirname(BACKUP_PATH), { recursive: true });
+    const body = JSON.stringify(
+      {
+        platform: process.platform,
+        backedUpAt: new Date().toISOString(),
+        payload: current,
+      },
+      null,
+      2
+    );
+    fs.writeFileSync(BACKUP_PATH, body + '\n', { encoding: 'utf8', mode: 0o600 });
+    console.log(`已备份原生 Claude 凭据到: ${BACKUP_PATH}`);
+  } catch (e) {
+    console.error(`备份原生 Claude 凭据失败: ${e.message}`);
+  }
+}
+
+/** 在清空第三方配置后自动恢复原生凭据。 */
+function restoreNativeCredentialIfNeeded() {
+  if (process.platform === 'win32') return;
+  if (!fs.existsSync(BACKUP_PATH)) return;
+
+  let backup;
+  try {
+    backup = JSON.parse(fs.readFileSync(BACKUP_PATH, 'utf8'));
+  } catch {
+    return;
+  }
+  if (!backup || typeof backup.payload !== 'string' || !backup.payload) return;
+
+  const current = readNativeClaudeCredential();
+  if (current === backup.payload) return;
+
+  const ok = writeNativeClaudeCredential(backup.payload);
+  if (ok) {
+    console.log('已恢复原生 Claude 凭据（来自备份）');
+  } else {
+    console.error(`恢复原生 Claude 凭据失败，备份仍保留: ${BACKUP_PATH}`);
+  }
+}
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -23,6 +132,8 @@ function parseArgs(argv) {
       args.help = true;
     } else if (a === 'apply-envs') {
       args.command = 'apply-envs';
+    } else if (a === 'restore-login') {
+      args.command = 'restore-login';
     }
   }
   return args;
@@ -34,6 +145,7 @@ function printHelp() {
 
 命令:
   apply-envs          输出当前配置的环境变量语句，供当前 shell 执行
+  restore-login       从备份恢复原生 Claude 登录凭据（Keychain / .credentials.json）
 
 选项:
   -f, --file <path>     凭据文件路径（见下方默认查找顺序）
@@ -279,6 +391,42 @@ async function main() {
     process.exit(0);
   }
 
+  // 处理 restore-login 命令
+  if (args.command === 'restore-login') {
+    if (process.platform === 'win32') {
+      console.error('Windows 暂不支持自动恢复原生 Claude 凭据，请使用 /login 重新登录。');
+      process.exit(1);
+    }
+    if (!fs.existsSync(BACKUP_PATH)) {
+      console.error(`未找到备份文件: ${BACKUP_PATH}`);
+      process.exit(1);
+    }
+    let backup;
+    try {
+      backup = JSON.parse(fs.readFileSync(BACKUP_PATH, 'utf8'));
+    } catch (e) {
+      console.error(`备份文件解析失败: ${e.message}`);
+      process.exit(1);
+    }
+    if (!backup || typeof backup.payload !== 'string' || !backup.payload) {
+      console.error('备份文件内容无效。');
+      process.exit(1);
+    }
+    const current = readNativeClaudeCredential();
+    if (current === backup.payload) {
+      console.log('当前原生凭据已与备份一致，无需恢复。');
+      process.exit(0);
+    }
+    const ok = writeNativeClaudeCredential(backup.payload);
+    if (ok) {
+      console.log('已从备份恢复原生 Claude 凭据。');
+      process.exit(0);
+    } else {
+      console.error(`恢复失败，备份仍保留: ${BACKUP_PATH}`);
+      process.exit(1);
+    }
+  }
+
   let credPath;
   let noCredentialsFile = false;
   if (args.file) {
@@ -490,6 +638,8 @@ async function main() {
 
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
     console.log(`已清空配置: ${settingsPath}`);
+
+    restoreNativeCredentialIfNeeded();
     process.exit(0);
   }
 
@@ -536,6 +686,8 @@ async function main() {
     console.log('已取消。');
     process.exit(0);
   }
+
+  backupNativeCredentialIfNeeded();
 
   const home = os.homedir();
   const claudeDir = path.join(home, '.claude');
