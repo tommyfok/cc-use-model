@@ -387,6 +387,40 @@ function isCurrentProvider(cfg, currentUrlNorm, currentEnvKey) {
   return normalizeBaseUrl(cfg.apiUrl) === currentUrlNorm;
 }
 
+/** 判断是否有第三方配置需要清理（即 settings.json 中有 envKey/ANTHROPIC_*） */
+function hasThirdPartyConfigToClear() {
+  const { baseUrl, envKey } = getCurrentClaudeSelection();
+  const currentUrlNorm = normalizeBaseUrl(baseUrl);
+  const hasEnvKeys = Array.isArray(envKey) && envKey.length > 0;
+  const hasBaseUrl = Boolean(currentUrlNorm);
+  return hasEnvKeys || hasBaseUrl;
+}
+
+/** 描述当前 ~/.claude/settings.json 实际生效的凭据状态，用于菜单展示 */
+function describeCurrentCredentialState(credentials) {
+  const { baseUrl, model, envKey } = getCurrentClaudeSelection();
+  const currentUrlNorm = normalizeBaseUrl(baseUrl);
+  const hasEnvKeys = Array.isArray(envKey) && envKey.length > 0;
+  const hasBaseUrl = Boolean(currentUrlNorm);
+
+  if (hasBaseUrl || hasEnvKeys) {
+    let providerName = null;
+    for (const [name, cfg] of Object.entries(credentials)) {
+      if (isCurrentProvider(cfg, currentUrlNorm, envKey)) {
+        providerName = name;
+        break;
+      }
+    }
+    const who = providerName || '未知第三方 provider';
+    return model ? `正在使用 ${who} / ${model}` : `正在使用 ${who}`;
+  }
+
+  const native = readNativeClaudeCredential();
+  if (native) return '正在使用官方登录凭证';
+
+  return '当前无任何凭据';
+}
+
 /** 把凭据对象持久化到磁盘 */
 function saveCredentials(credPath, credentials) {
   const credDir = path.dirname(credPath);
@@ -518,6 +552,253 @@ async function manageCredentials(credentials, credPath, { currentUrlNorm, curren
   }
 }
 
+/** 子流程返回标识 */
+const BACK = '__BACK__';
+
+/** 添加 Provider 子流程；成功返回新 provider 名，取消/返回返回 BACK */
+async function addProviderFlow(credentials, credPath) {
+  let newProviderName;
+  if (Object.keys(credentials).length > 0) {
+    newProviderName = await safePrompt((signal) => select({
+      message: '选择已有 Provider（覆盖）或新增',
+      choices: [
+        { name: '➕  新增 Provider', value: '__NEW__' },
+        ...Object.keys(credentials).map((name) => ({ name: `覆盖：${name}`, value: name })),
+        { name: '← 返回上一层', value: BACK },
+      ],
+    }, { signal }));
+    if (newProviderName === BACK) return null;
+    if (newProviderName === '__NEW__') {
+      newProviderName = await safePrompt((signal) => input({
+        message: '请输入 Provider 名称',
+        validate: (v) => (v && String(v).trim() ? true : '不能为空'),
+      }, { signal }));
+      newProviderName = String(newProviderName).trim();
+    }
+  } else {
+    newProviderName = await safePrompt((signal) => input({
+      message: '请输入 Provider 名称',
+      validate: (v) => (v && String(v).trim() ? true : '不能为空'),
+    }, { signal }));
+    newProviderName = String(newProviderName).trim();
+  }
+
+  const apiUrl = await safePrompt((signal) => input({
+    message: '请输入 API URL',
+    default: credentials[newProviderName]?.apiUrl || 'https://api.anthropic.com',
+    validate: (v) => (v && String(v).trim() ? true : '不能为空'),
+  }, { signal }));
+
+  const apiKey = await safePrompt((signal) => input({
+    message: '请输入 API Key',
+    default: credentials[newProviderName]?.apiKey || undefined,
+    validate: (v) => (v && String(v).trim() ? true : '不能为空'),
+  }, { signal }));
+
+  const modelsInput = await safePrompt((signal) => input({
+    message: '请输入 Models（逗号分隔）',
+    default: credentials[newProviderName]?.models?.join(', ') || undefined,
+  }, { signal }));
+  const models = modelsInput
+    ? modelsInput.split(',').map((m) => m.trim()).filter(Boolean)
+    : [];
+
+  const ok = await safePrompt((signal) => confirm({
+    message: `将保存到 ${credPath}：\n  Provider: ${newProviderName}\n  API URL: ${apiUrl}\n  API Key: （已隐藏）\n  Models: ${models.length > 0 ? models.join(', ') : '（无）'}\n确认？`,
+    default: true,
+  }, { signal }));
+  if (!ok) {
+    console.log('已取消。');
+    return BACK;
+  }
+
+  // 读取或创建 credentials.json，避免覆盖磁盘上已有的其他 provider
+  let allCredentials = { ...credentials };
+  if (fs.existsSync(credPath)) {
+    try {
+      const raw = fs.readFileSync(credPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        allCredentials = parsed;
+      }
+    } catch {}
+  }
+
+  allCredentials[newProviderName] = {
+    apiUrl: apiUrl.trim(),
+    apiKey: apiKey.trim(),
+    ...(models.length > 0 ? { models } : {}),
+  };
+
+  saveCredentials(credPath, allCredentials);
+  console.log(`已保存凭据: ${credPath}`);
+  credentials[newProviderName] = allCredentials[newProviderName];
+  return newProviderName;
+}
+
+/** 把选好的 provider/model 写入 settings.json */
+function applySettings(cfg, model) {
+  backupNativeCredentialIfNeeded();
+
+  const claudeDir = path.join(os.homedir(), '.claude');
+  const settingsPath = settingsPathClaude();
+  if (!fs.existsSync(claudeDir)) {
+    fs.mkdirSync(claudeDir, { recursive: true });
+  }
+
+  const settings = loadOrInitSettings(settingsPath);
+  const env = settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env) ? settings.env : {};
+
+  if (Array.isArray(settings.envKey)) {
+    for (const k of settings.envKey) {
+      if (typeof k === 'string' && k in env) delete env[k];
+    }
+  }
+
+  if (cfg.env) {
+    for (const [k, v] of Object.entries(cfg.env)) {
+      env[k] = v;
+    }
+    env.ANTHROPIC_MODEL = model;
+    settings.envKey = Object.keys(cfg.env);
+  } else {
+    if ('envKey' in settings) delete settings.envKey;
+    env.ANTHROPIC_AUTH_TOKEN = cfg.apiKey;
+    env.ANTHROPIC_BASE_URL = cfg.apiUrl;
+    env.ANTHROPIC_MODEL = model;
+  }
+
+  settings.env = env;
+  settings.model = model;
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+  console.log(`已更新: ${settingsPath}`);
+}
+
+/** 选择 Provider/Model 并应用到 settings.json；应用后返回 undefined（回到主菜单），返回 BACK 表示中途取消返回主菜单 */
+async function selectAndApplyFlow(credentials, presetProvider = null) {
+  if (Object.keys(credentials).length === 0) {
+    console.log('当前没有任何 Provider，请先添加。');
+    return BACK;
+  }
+
+  const { baseUrl, model: currentModel, envKey: currentEnvKey } = getCurrentClaudeSelection();
+  const currentUrlNorm = normalizeBaseUrl(baseUrl);
+
+  let provider = presetProvider;
+
+  while (true) {
+    if (!provider) {
+      const providerKeys = orderCurrentFirst(Object.keys(credentials), (name) =>
+        isCurrentProvider(credentials[name], currentUrlNorm, currentEnvKey)
+      );
+      provider = await safePrompt((signal) => select({
+        message: '选择 Provider',
+        choices: [
+          ...providerKeys.map((name) => {
+            const c = credentials[name];
+            const isCur = isCurrentProvider(c, currentUrlNorm, currentEnvKey);
+            return { name: isCur ? `${name} （当前选择）` : name, value: name };
+          }),
+          { name: '← 返回上一层', value: BACK },
+        ],
+      }, { signal }));
+      if (provider === BACK) return BACK;
+    }
+
+    const cfg = credentials[provider];
+    let model;
+
+    if (Array.isArray(cfg.models) && cfg.models.length > 0) {
+      const modelsOrdered = orderCurrentFirst(
+        cfg.models.map((m) => String(m)),
+        (m) => Boolean(currentModel && m === currentModel)
+      );
+      model = await safePrompt((signal) => select({
+        message: `选择 Model（${provider}）`,
+        choices: [
+          ...modelsOrdered.map((m) => ({
+            name: currentModel && m === currentModel ? `${m} （当前选择）` : m,
+            value: m,
+          })),
+          { name: '← 返回上一层（重选 Provider）', value: BACK },
+        ],
+      }, { signal }));
+      if (model === BACK) {
+        provider = null;
+        continue;
+      }
+    } else {
+      const hint = currentModel ? `（回车沿用当前：${currentModel}）` : '';
+      model = await safePrompt((signal) => input({
+        message: `该 provider 未配置 models，请输入 model 名称${hint}`,
+        default: currentModel || undefined,
+        validate: (v) => (v && String(v).trim() ? true : '不能为空'),
+      }, { signal }));
+      model = String(model).trim();
+    }
+
+    let preview;
+    if (cfg.env) {
+      const envPairs = Object.entries(cfg.env)
+        .map(([k, v]) => `  ${k}: ${k.toLowerCase().includes('token') || k.toLowerCase().includes('key') ? '（已隐藏）' : v}`)
+        .join('\n');
+      preview = `将写入 ~/.claude/settings.json：\n${envPairs}\n  ANTHROPIC_MODEL: ${model}\n确认？`;
+    } else {
+      preview = `将写入 ~/.claude/settings.json：\n  ANTHROPIC_BASE_URL: ${cfg.apiUrl}\n  ANTHROPIC_MODEL: ${model}\n  ANTHROPIC_AUTH_TOKEN: （已隐藏）\n确认？`;
+    }
+
+    const ok = await safePrompt((signal) => confirm({ message: preview, default: true }, { signal }));
+    if (!ok) {
+      console.log('已取消。');
+      return BACK;
+    }
+
+    applySettings(cfg, model);
+    // 应用成功，不返回任何值（调用者不 process.exit，直接回到主菜单循环）
+    return;
+  }
+}
+
+/** 清空配置子流程；成功或取消后都返回 undefined（回到主菜单） */
+async function clearConfigFlow() {
+  const ok = await safePrompt((signal) => confirm({
+    message: '将清空 ~/.claude/settings.json 中的 env 配置（ANTHROPIC_AUTH_TOKEN、ANTHROPIC_BASE_URL、ANTHROPIC_MODEL 等）\n确认？',
+    default: true,
+  }, { signal }));
+  if (!ok) {
+    console.log('已取消。');
+    return BACK;
+  }
+
+  const claudeDir = path.join(os.homedir(), '.claude');
+  const settingsPath = settingsPathClaude();
+  if (!fs.existsSync(claudeDir)) {
+    fs.mkdirSync(claudeDir, { recursive: true });
+  }
+
+  const settings = loadOrInitSettings(settingsPath);
+  const env = settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env) ? settings.env : {};
+
+  if (Array.isArray(settings.envKey)) {
+    for (const k of settings.envKey) {
+      if (typeof k === 'string' && k in env) delete env[k];
+    }
+    delete settings.envKey;
+  }
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  delete env.ANTHROPIC_BASE_URL;
+  delete env.ANTHROPIC_MODEL;
+  delete settings.model;
+  settings.env = env;
+
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+  console.log(`已清空配置: ${settingsPath}`);
+
+  restoreNativeCredentialIfNeeded();
+  // 不返回任何值（回到主菜单）
+  return;
+}
+
 async function main() {
   // 设置 escape 键监听
   setupEscapeListener();
@@ -571,8 +852,8 @@ async function main() {
     }
   }
 
+  // 解析凭据文件路径
   let credPath;
-  let noCredentialsFile = false;
   if (args.file) {
     credPath = path.resolve(args.file);
     if (!fs.existsSync(credPath)) {
@@ -580,20 +861,12 @@ async function main() {
       process.exit(1);
     }
   } else {
-    credPath = resolveCredentialsPathAuto();
-    if (!credPath) {
-      noCredentialsFile = true;
-      // 默认使用 ~/.config/cc-use-model/credentials.json
-      credPath = path.join(os.homedir(), '.config', 'cc-use-model', 'credentials.json');
-    }
-  }
-
-  if (!noCredentialsFile) {
-    console.log(`使用凭据: ${credPath}`);
+    credPath = resolveCredentialsPathAuto() || path.join(os.homedir(), '.config', 'cc-use-model', 'credentials.json');
   }
 
   let credentials = {};
-  if (!noCredentialsFile) {
+  if (fs.existsSync(credPath)) {
+    console.log(`使用凭据: ${credPath}`);
     try {
       credentials = loadCredentials(credPath);
     } catch (e) {
@@ -602,284 +875,81 @@ async function main() {
     }
   }
 
-  const { baseUrl: currentBaseUrl, model: currentModel, envKey: currentEnvKey } = getCurrentClaudeSelection();
-  const currentUrlNorm = normalizeBaseUrl(currentBaseUrl);
-
-  const providerKeys = orderCurrentFirst(Object.keys(credentials), (name) => {
-    const c = credentials[name];
-    if (c?.env && currentEnvKey) {
-      const keys = Object.keys(c.env).sort();
-      const cur = [...currentEnvKey].sort();
-      if (keys.length !== cur.length) return false;
-      return keys.every((k, i) => k === cur[i]);
-    }
-    if (!currentUrlNorm) return false;
-    if (!c?.apiUrl) return false;
-    return normalizeBaseUrl(c.apiUrl) === currentUrlNorm;
-  });
-
-  // 特殊选项：增加配置、管理凭据、清空配置
-  const ADD_CHOICE = '__ADD__';
-  const MANAGE_CHOICE = '__MANAGE__';
-  const CLEAR_CHOICE = '__CLEAR__';
-
-  // 如果没有凭据文件，直接进入增加配置流程
-  let provider;
-  if (noCredentialsFile) {
-    provider = ADD_CHOICE;
-  } else {
-    provider = await safePrompt((signal) => select({
-      message: '选择 Provider',
-      choices: [
-        ...providerKeys.map((name) => {
-          const c = credentials[name];
-          const isCur =
-            (c?.env &&
-              currentEnvKey &&
-              Object.keys(c.env).length === currentEnvKey.length &&
-              Object.keys(c.env).every((k) => currentEnvKey.includes(k))) ||
-            (currentUrlNorm && c?.apiUrl && normalizeBaseUrl(c.apiUrl) === currentUrlNorm);
-          return {
-            name: isCur ? `${name} （当前选择）` : name,
-            value: name,
-          };
-        }),
-        { name: '➕  增加配置', value: ADD_CHOICE },
-        { name: '⚙️  管理凭据（编辑 / 删除）', value: MANAGE_CHOICE },
-        { name: '🗑️  清空配置（恢复无 API Key 状态）', value: CLEAR_CHOICE },
-      ],
-    }, { signal }));
-  }
-
-  // 处理管理凭据
-  if (provider === MANAGE_CHOICE) {
-    await manageCredentials(credentials, credPath, { currentUrlNorm, currentEnvKey });
-    process.exit(0);
-  }
-
-  // 处理增加配置
-  if (provider === ADD_CHOICE) {
-    // 让用户填写 provider 名称，如果已有凭据则提供选择
-    let newProviderName;
-    if (Object.keys(credentials).length > 0) {
-      newProviderName = await safePrompt((signal) => select({
-        message: '选择或输入 Provider 名称',
-        choices: [
-          ...Object.keys(credentials).map((name) => ({ name, value: name })),
-          { name: '➕  新增 Provider', value: '__NEW__' },
-        ],
+  // 顶层菜单循环：每轮根据是否有 provider 决定走首次引导还是主菜单
+  let firstRound = true;
+  while (true) {
+    // 空状态：直接引导添加第一个 Provider
+    if (Object.keys(credentials).length === 0) {
+      if (firstRound) {
+        console.log('\n👋 欢迎使用 cc-use-model！当前没有任何 Provider，让我们先添加第一个。\n');
+      } else {
+        console.log('\n当前没有任何 Provider，请添加一个。\n');
+      }
+      firstRound = false;
+      const newName = await addProviderFlow(credentials, credPath);
+      if (newName === BACK) {
+        console.log('未创建 Provider，已退出。');
+        process.exit(0);
+      }
+      const useNow = await safePrompt((signal) => confirm({
+        message: `是否立即使用 Provider「${newName}」？`,
+        default: true,
       }, { signal }));
-      if (newProviderName === '__NEW__') {
-        newProviderName = await safePrompt((signal) => input({
-          message: '请输入 Provider 名称',
-          validate: (v) => (v && String(v).trim() ? true : '不能为空'),
+      if (useNow) {
+        await selectAndApplyFlow(credentials, newName);
+        // 成功应用后，进入主菜单循环
+      }
+      continue;
+    }
+
+    firstRound = false;
+
+    const needsClear = hasThirdPartyConfigToClear();
+    const stateDesc = describeCurrentCredentialState(credentials);
+
+    const menuChoices = [
+      { name: '🎯  选择 Provider / Model', value: 'select' },
+      { name: '➕  添加 Provider', value: 'add' },
+      { name: '⚙️  管理凭据（编辑 / 删除）', value: 'manage' },
+    ];
+    if (needsClear) {
+      menuChoices.push({ name: `🗑️  清空配置（${stateDesc}）`, value: 'clear' });
+    }
+    menuChoices.push({ name: '👋  退出', value: 'exit' });
+
+    const action = await safePrompt((signal) => select({
+      message: '请选择操作',
+      choices: menuChoices,
+    }, { signal }));
+
+    if (action === 'exit') {
+      process.exit(0);
+    } else if (action === 'select') {
+      await selectAndApplyFlow(credentials);
+      // 回到主菜单，重新构建菜单选项（可能出现/消失清空选项）
+    } else if (action === 'add') {
+      const newName = await addProviderFlow(credentials, credPath);
+      if (newName && newName !== BACK) {
+        const useNow = await safePrompt((signal) => confirm({
+          message: `是否立即使用 Provider「${newName}」？`,
+          default: true,
         }, { signal }));
-        newProviderName = String(newProviderName).trim();
-      }
-    } else {
-      newProviderName = await safePrompt((signal) => input({
-        message: '请输入 Provider 名称',
-        validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-      }, { signal }));
-      newProviderName = String(newProviderName).trim();
-    }
-
-    const apiUrl = await safePrompt((signal) => input({
-      message: '请输入 API URL',
-      default: credentials[newProviderName]?.apiUrl || 'https://api.anthropic.com',
-      validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-    }, { signal }));
-
-    const apiKey = await safePrompt((signal) => input({
-      message: '请输入 API Key',
-      default: credentials[newProviderName]?.apiKey || undefined,
-      validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-    }, { signal }));
-
-    const modelsInput = await safePrompt((signal) => input({
-      message: '请输入 Models（逗号分隔）',
-      default: credentials[newProviderName]?.models?.join(', ') || undefined,
-    }, { signal }));
-    const models = modelsInput
-      ? modelsInput.split(',').map((m) => m.trim()).filter(Boolean)
-      : [];
-
-    // 确认保存
-    const ok = await safePrompt((signal) => confirm({
-      message: `将保存到 ${credPath}：\n  Provider: ${newProviderName}\n  API URL: ${apiUrl}\n  API Key: （已隐藏）\n  Models: ${models.length > 0 ? models.join(', ') : '（无）'}\n确认？`,
-      default: true,
-    }, { signal }));
-    if (!ok) {
-      console.log('已取消。');
-      process.exit(0);
-    }
-
-    // 读取或创建 credentials.json
-    let allCredentials = {};
-    if (fs.existsSync(credPath)) {
-      try {
-        const raw = fs.readFileSync(credPath, 'utf8');
-        allCredentials = JSON.parse(raw);
-        if (typeof allCredentials !== 'object' || allCredentials === null || Array.isArray(allCredentials)) {
-          allCredentials = {};
+        if (useNow) {
+          await selectAndApplyFlow(credentials, newName);
+          // 回到主菜单
         }
-      } catch {
-        allCredentials = {};
       }
-    }
-
-    allCredentials[newProviderName] = {
-      apiUrl: apiUrl.trim(),
-      apiKey: apiKey.trim(),
-      ...(models.length > 0 ? { models } : {}),
-    };
-
-    // 确保目录存在
-    const credDir = path.dirname(credPath);
-    if (!fs.existsSync(credDir)) {
-      fs.mkdirSync(credDir, { recursive: true });
-    }
-
-    fs.writeFileSync(credPath, JSON.stringify(allCredentials, null, 2) + '\n', 'utf8');
-    console.log(`已保存凭据: ${credPath}`);
-
-    // 更新 credentials 并继续选择 model
-    credentials[newProviderName] = allCredentials[newProviderName];
-    provider = newProviderName;
-  }
-
-  // 处理清空配置
-  if (provider === CLEAR_CHOICE) {
-    const ok = await safePrompt((signal) => confirm({
-      message: '将清空 ~/.claude/settings.json 中的 env 配置（ANTHROPIC_AUTH_TOKEN、ANTHROPIC_BASE_URL、ANTHROPIC_MODEL 等）\n确认？',
-      default: true,
-    }, { signal }));
-    if (!ok) {
-      console.log('已取消。');
-      process.exit(0);
-    }
-
-    const home = os.homedir();
-    const claudeDir = path.join(home, '.claude');
-    const settingsPath = settingsPathClaude();
-
-    if (!fs.existsSync(claudeDir)) {
-      fs.mkdirSync(claudeDir, { recursive: true });
-    }
-
-    const settings = loadOrInitSettings(settingsPath);
-    const env = settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env) ? settings.env : {};
-
-    // 清理 envKey 对应的 env 变量
-    if (Array.isArray(settings.envKey)) {
-      for (const k of settings.envKey) {
-        if (typeof k === 'string' && k in env) delete env[k];
-      }
-      delete settings.envKey;
-    }
-
-    // 清理 ANTHROPIC 相关字段
-    delete env.ANTHROPIC_AUTH_TOKEN;
-    delete env.ANTHROPIC_BASE_URL;
-    delete env.ANTHROPIC_MODEL;
-
-    // 清理顶层 model 字段
-    delete settings.model;
-
-    settings.env = env;
-
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
-    console.log(`已清空配置: ${settingsPath}`);
-
-    restoreNativeCredentialIfNeeded();
-    process.exit(0);
-  }
-
-  const cfg = credentials[provider];
-  let model;
-
-  if (Array.isArray(cfg.models) && cfg.models.length > 0) {
-    const modelsOrdered = orderCurrentFirst(
-      cfg.models.map((m) => String(m)),
-      (m) => Boolean(currentModel && m === currentModel)
-    );
-    model = await safePrompt((signal) => select({
-      message: `选择 Model（${provider}）`,
-      choices: modelsOrdered.map((m) => ({
-        name: currentModel && m === currentModel ? `${m} （当前选择）` : m,
-        value: m,
-      })),
-    }, { signal }));
-  } else {
-    const hint =
-      currentModel && (!cfg.models || cfg.models.length === 0)
-        ? `（回车沿用当前：${currentModel}）`
-        : '';
-    model = await safePrompt((signal) => input({
-      message: `该 provider 未配置 models，请输入 model 名称${hint}`,
-      default: currentModel || undefined,
-      validate: (v) => (v && String(v).trim() ? true : '不能为空'),
-    }, { signal }));
-    model = String(model).trim();
-  }
-
-  let preview = '';
-  if (cfg.env) {
-    const envPairs = Object.entries(cfg.env)
-      .map(([k, v]) => `  ${k}: ${k.toLowerCase().includes('token') || k.toLowerCase().includes('key') ? '（已隐藏）' : v}`)
-      .join('\n');
-    preview = `将写入 ~/.claude/settings.json：\n${envPairs}\n  ANTHROPIC_MODEL: ${model}\n确认？`;
-  } else {
-    preview = `将写入 ~/.claude/settings.json：\n  ANTHROPIC_BASE_URL: ${cfg.apiUrl}\n  ANTHROPIC_MODEL: ${model}\n  ANTHROPIC_AUTH_TOKEN: （已隐藏）\n确认？`;
-  }
-
-  const ok = await safePrompt((signal) => confirm({ message: preview, default: true }, { signal }));
-  if (!ok) {
-    console.log('已取消。');
-    process.exit(0);
-  }
-
-  backupNativeCredentialIfNeeded();
-
-  const home = os.homedir();
-  const claudeDir = path.join(home, '.claude');
-  const settingsPath = settingsPathClaude();
-
-  if (!fs.existsSync(claudeDir)) {
-    fs.mkdirSync(claudeDir, { recursive: true });
-  }
-
-  const settings = loadOrInitSettings(settingsPath);
-  const env = settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env) ? settings.env : {};
-
-  // 切换 provider 时，清理旧 envKey 对应的 env 变量
-  if (Array.isArray(settings.envKey)) {
-    for (const k of settings.envKey) {
-      if (typeof k === 'string' && k in env) delete env[k];
+    } else if (action === 'manage') {
+      const { baseUrl, envKey } = getCurrentClaudeSelection();
+      await manageCredentials(credentials, credPath, {
+        currentUrlNorm: normalizeBaseUrl(baseUrl),
+        currentEnvKey: envKey,
+      });
+    } else if (action === 'clear') {
+      await clearConfigFlow();
+      // 回到主菜单
     }
   }
-
-  if (cfg.env) {
-    // env provider：忽略 apiUrl/apiKey，覆盖写入对应 env 字段，并记录 envKey
-    for (const [k, v] of Object.entries(cfg.env)) {
-      env[k] = v;
-    }
-    env.ANTHROPIC_MODEL = model;
-    settings.envKey = Object.keys(cfg.env);
-  } else {
-    // 非 env provider：删除旧 envKey，并按原逻辑写入 ANTHROPIC_*
-    if ('envKey' in settings) delete settings.envKey;
-    env.ANTHROPIC_AUTH_TOKEN = cfg.apiKey;
-    env.ANTHROPIC_BASE_URL = cfg.apiUrl;
-    env.ANTHROPIC_MODEL = model;
-  }
-
-  settings.env = env;
-
-  settings.model = model;
-
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
-  console.log(`已更新: ${settingsPath}`);
 }
 
 main().catch((err) => {

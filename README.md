@@ -64,14 +64,19 @@ cc-use-model -h
 3. `credentials.json` next to the installed tool (useful with `npm link`)
 4. `~/.config/cc-use-model/credentials.json`
 
-### Interactive provider selection
+### Interactive menu
 
-When run without a subcommand, the tool presents an interactive menu with:
+When run without a subcommand, the tool presents a top-level menu:
 
-- All providers from `credentials.json` (current selection is highlighted)
-- **➕ Add configuration** — interactively add a new provider (or overwrite an existing one) and save it back to `credentials.json`
-- **⚙️ Manage credentials** — list every provider in `credentials.json` with details (URL / type / models) and let you **edit** or **delete** each entry. Standard providers (`apiUrl` / `apiKey`) support full editing; `env` providers support editing the `models` field and deletion (edit the `env` object manually for advanced changes).
-- **🗑️ Clear configuration** — remove all API keys from `settings.json` and restore native Claude login credentials (see below)
+- **🎯 Select Provider / Model** — pick a provider, then its model, then apply the selection to `~/.claude/settings.json`. Both the provider list and model list have a `← Back` option so you can navigate up. After applying, you're returned to the menu.
+- **➕ Add Provider** — interactively add a new provider (or overwrite an existing one) and save it to `credentials.json`. After saving, you're asked whether to immediately apply it.
+- **⚙️ Manage credentials (edit / delete)** — list every provider with details (URL / type / models) and let you **edit** or **delete** each entry. Standard providers (`apiUrl` / `apiKey`) support full editing; `env` providers support editing the `models` field and deletion (edit the `env` object manually for advanced changes).
+- **🗑️ Clear configuration** (only shown when needed) — appears only when `~/.claude/settings.json` has third-party config to clear; displays the current state (e.g., "正在使用 qcloud / glm-4.5"). The option is hidden if using native credentials or no credentials at all.
+- **👋 Exit**
+
+After completing any action (select / add / manage / clear), you're returned to the top-level menu, so you can perform multiple operations in one session. The menu updates dynamically after each action (e.g., "Clear configuration" appears/disappears as the state changes).
+
+**First-time experience**: if `credentials.json` is missing or empty, the tool skips the menu and goes straight to the Add Provider flow. After saving, it asks whether to apply the new provider immediately.
 
 ### Subcommand `apply-envs`
 
@@ -189,14 +194,19 @@ cc-use-model -h
 3. 本工具所在目录下的 `credentials.json`（`npm link` 后从任意目录执行都会读到）
 4. `~/.config/cc-use-model/credentials.json`
 
-### 交互式 Provider 选择
+### 交互式菜单
 
-不带子命令运行时，工具会弹出交互菜单，包含：
+不带子命令运行时，工具会弹出顶层菜单：
 
-- `credentials.json` 中的所有 provider（当前选中项会高亮）
-- **➕ 增加配置** — 交互式新增 provider（或覆盖已有同名 provider）并保存回 `credentials.json`
+- **🎯 选择 Provider / Model** — 选择 provider，再选 model，应用到 `~/.claude/settings.json`。provider 列表和 model 列表都带有 `← 返回上一层` 选项，可逐级返回。应用成功后返回菜单
+- **➕ 添加 Provider** — 交互式新增 provider（或覆盖已有同名 provider）并保存回 `credentials.json`。保存后会询问是否立即使用
 - **⚙️ 管理凭据（编辑 / 删除）** — 列出所有 provider 及其详情（URL / 类型 / models），可对每项执行**编辑**或**删除**。标准 provider（`apiUrl` / `apiKey`）支持完整编辑；`env` provider 支持编辑 `models` 字段及删除（如需修改 `env` 对象请手动编辑文件）
-- **🗑️ 清空配置（恢复无 API Key 状态）** — 清除 `settings.json` 中的 API Key，并自动恢复原生 Claude 登录凭据（见下方说明）
+- **🗑️ 清空配置（当前状态）**（仅在需要时显示）—— 只有当 `~/.claude/settings.json` 有第三方配置需要清理时才显示，菜单项文案会显示当前实际状态（例如：`🗑️  清空配置（正在使用 qcloud / glm-4.5）`）。正在使用官方登录凭证或无任何凭据时该选项隐藏
+- **👋 退出**
+
+任意操作（选择 / 添加 / 管理 / 清空）完成后都会返回顶层菜单，可在一次会话中连续执行多个操作。每次回到菜单都会根据当前配置动态调整选项（例如：应用第三方配置后会出现"清空配置"，清空后该选项消失）。
+
+**首次使用**：当 `credentials.json` 不存在或为空时，工具会跳过菜单直接进入"添加 Provider"流程；保存后会询问是否立即使用刚添加的 provider。
 
 ### 子命令 `apply-envs`
 
