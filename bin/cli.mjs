@@ -59,22 +59,44 @@ function writeNativeClaudeCredential(payload) {
   }
 }
 
-/** 在切换到第三方 provider 之前自动备份原生凭据。 */
+/** 读取现有备份（无则返回 null）。 */
+function readBackup() {
+  if (!fs.existsSync(BACKUP_PATH)) return null;
+  try {
+    const raw = JSON.parse(fs.readFileSync(BACKUP_PATH, 'utf8'));
+    return raw && typeof raw === 'object' ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 在切换到第三方 provider 之前自动备份原生凭据，以及切换前的 settings.model。 */
 function backupNativeCredentialIfNeeded() {
   if (process.platform === 'win32') return;
   const current = readNativeClaudeCredential();
-  if (!current) return;
 
-  let existingBackup = null;
-  if (fs.existsSync(BACKUP_PATH)) {
-    try {
-      const raw = JSON.parse(fs.readFileSync(BACKUP_PATH, 'utf8'));
-      if (raw && typeof raw.payload === 'string') existingBackup = raw.payload;
-    } catch {
-      existingBackup = null;
+  // 只在当前还不是第三方状态时捕获 settings.model，避免把第三方 model 当作原值覆盖备份
+  const inNativeState = !hasThirdPartyConfigToClear();
+  let originalModel = null;
+  if (inNativeState) {
+    const settings = loadOrInitSettings(settingsPathClaude());
+    if (typeof settings.model === 'string' && settings.model.trim()) {
+      originalModel = settings.model;
     }
   }
-  if (existingBackup === current) return;
+
+  const existing = readBackup();
+  // native 态：以当前 settings.model 为准（含"未设置"），不回退到旧备份，避免复活已被用户清除的旧 model；
+  // 第三方→第三方：originalModel 必为 null，保留已存的备份值
+  const mergedOriginalModel = inNativeState
+    ? originalModel
+    : (existing && typeof existing.originalModel === 'string' ? existing.originalModel : null);
+  const existingPayload = existing && typeof existing.payload === 'string' ? existing.payload : null;
+  const existingOriginalModel = existing && typeof existing.originalModel === 'string' ? existing.originalModel : null;
+  const mergedPayload = current || existingPayload;
+
+  if (!mergedPayload && !mergedOriginalModel) return;
+  if (existingPayload === (mergedPayload || null) && existingOriginalModel === mergedOriginalModel) return;
 
   try {
     fs.mkdirSync(path.dirname(BACKUP_PATH), { recursive: true });
@@ -82,40 +104,65 @@ function backupNativeCredentialIfNeeded() {
       {
         platform: process.platform,
         backedUpAt: new Date().toISOString(),
-        payload: current,
+        payload: mergedPayload || null,
+        originalModel: mergedOriginalModel || null,
       },
       null,
       2
     );
     fs.writeFileSync(BACKUP_PATH, body + '\n', { encoding: 'utf8', mode: 0o600 });
-    console.log(`已备份原生 Claude 凭据到: ${BACKUP_PATH}`);
+    // mode 选项仅在创建时生效；对已存在的文件显式收紧权限，避免旧版本/外部工具留下 0o644 的凭据备份
+    try { fs.chmodSync(BACKUP_PATH, 0o600); } catch {}
+    const what = [];
+    if (mergedPayload) what.push(current ? '登录凭据' : '已有登录凭据备份');
+    if (mergedOriginalModel) what.push(`model="${mergedOriginalModel}"`);
+    console.log(`已备份原生 Claude ${what.join(' + ')} 到: ${BACKUP_PATH}`);
   } catch (e) {
     console.error(`备份原生 Claude 凭据失败: ${e.message}`);
   }
 }
 
+/** 从备份恢复 settings.model（如有），返回恢复的 model 或 null。 */
+function restoreModelFromBackup() {
+  if (process.platform === 'win32') return null;
+  const backup = readBackup();
+  if (!backup || typeof backup.originalModel !== 'string' || !backup.originalModel.trim()) return null;
+  const settingsPath = settingsPathClaude();
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  const settings = loadOrInitSettings(settingsPath);
+  settings.model = backup.originalModel;
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+  return backup.originalModel;
+}
+
 /** 在清空第三方配置后自动恢复原生凭据。 */
 function restoreNativeCredentialIfNeeded() {
   if (process.platform === 'win32') return;
-  if (!fs.existsSync(BACKUP_PATH)) return;
+  const backup = readBackup();
+  if (!backup) return;
 
-  let backup;
-  try {
-    backup = JSON.parse(fs.readFileSync(BACKUP_PATH, 'utf8'));
-  } catch {
-    return;
+  // 恢复登录凭据：若写失败则中止后续 model 恢复，避免 settings 与 keychain/凭据文件状态错位
+  if (typeof backup.payload === 'string' && backup.payload) {
+    const current = readNativeClaudeCredential();
+    if (current !== backup.payload) {
+      const ok = writeNativeClaudeCredential(backup.payload);
+      if (ok) {
+        console.log('已恢复原生 Claude 凭据（来自备份）');
+      } else {
+        console.error(`恢复原生 Claude 凭据失败，备份仍保留: ${BACKUP_PATH}`);
+        return;
+      }
+    }
   }
-  if (!backup || typeof backup.payload !== 'string' || !backup.payload) return;
 
-  const current = readNativeClaudeCredential();
-  if (current === backup.payload) return;
-
-  const ok = writeNativeClaudeCredential(backup.payload);
-  if (ok) {
-    console.log('已恢复原生 Claude 凭据（来自备份）');
-  } else {
-    console.error(`恢复原生 Claude 凭据失败，备份仍保留: ${BACKUP_PATH}`);
+  // 恢复 settings.model
+  const restoredModel = restoreModelFromBackup();
+  if (restoredModel) {
+    console.log(`已恢复原 model: ${restoredModel}`);
   }
+
+  // 恢复成功后删除备份，避免下一轮 backup 复活已废弃的 originalModel/payload
+  try { fs.unlinkSync(BACKUP_PATH); } catch {}
 }
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -789,6 +836,7 @@ async function clearConfigFlow() {
   delete env.ANTHROPIC_AUTH_TOKEN;
   delete env.ANTHROPIC_BASE_URL;
   delete env.ANTHROPIC_MODEL;
+
   delete settings.model;
   settings.env = env;
 
@@ -834,23 +882,41 @@ async function main() {
       console.error(`备份文件解析失败: ${e.message}`);
       process.exit(1);
     }
-    if (!backup || typeof backup.payload !== 'string' || !backup.payload) {
+    if (!backup || typeof backup !== 'object') {
       console.error('备份文件内容无效。');
       process.exit(1);
     }
-    const current = readNativeClaudeCredential();
-    if (current === backup.payload) {
-      console.log('当前原生凭据已与备份一致，无需恢复。');
-      process.exit(0);
+
+    // 恢复登录凭据
+    const hasPayload = typeof backup.payload === 'string' && backup.payload;
+    if (hasPayload) {
+      const current = readNativeClaudeCredential();
+      if (current === backup.payload) {
+        console.log('当前原生凭据已与备份一致，无需恢复。');
+      } else {
+        const ok = writeNativeClaudeCredential(backup.payload);
+        if (ok) {
+          console.log('已从备份恢复原生 Claude 凭据。');
+        } else {
+          console.error(`恢复失败，备份仍保留: ${BACKUP_PATH}`);
+          process.exit(1);
+        }
+      }
     }
-    const ok = writeNativeClaudeCredential(backup.payload);
-    if (ok) {
-      console.log('已从备份恢复原生 Claude 凭据。');
-      process.exit(0);
-    } else {
-      console.error(`恢复失败，备份仍保留: ${BACKUP_PATH}`);
+
+    // 恢复 settings.model
+    const restoredModel = restoreModelFromBackup();
+    if (restoredModel) {
+      console.log(`已恢复原 model: ${restoredModel}`);
+    }
+
+    if (!hasPayload && !restoredModel) {
+      console.error('备份文件内容无效（无凭据也无 model）。');
       process.exit(1);
     }
+    // 恢复成功后删除备份，避免下次 backup 复活已废弃的 originalModel/payload
+    try { fs.unlinkSync(BACKUP_PATH); } catch {}
+    process.exit(0);
   }
 
   // 解析凭据文件路径

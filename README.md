@@ -117,8 +117,8 @@ Reads the backup at `~/.config/cc-use-model/claude-native-credentials.backup.jso
 - After you pick a model, sets the top-level **`model`** field to that choice in addition to merging `env`.
 - **Standard provider** (`apiUrl` / `apiKey`): keeps other `env` entries; only overwrites `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and `ANTHROPIC_MODEL`.
 - **`env` provider**: writes the keys from `env` plus `ANTHROPIC_MODEL`; stores `envKey` (list of keys from that provider) so switching back to a standard provider can remove those keys automatically.
-- **Clear configuration**: removes `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, top-level `model`, and all keys previously written via `env` providers (as tracked by `envKey`), restoring a no–API-key state.
-- **Native credential backup**: before writing a third-party provider's config, the tool automatically backs up any existing native Claude credential (macOS Keychain / `~/.claude/.credentials.json` on Linux) to `~/.config/cc-use-model/claude-native-credentials.backup.json`. The backup is restored automatically when you choose **Clear configuration**, or manually via `restore-login`.
+- **Clear configuration**: removes `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and all keys previously written via `env` providers (as tracked by `envKey`). If the previous top-level `model` was backed up before switching to a third-party provider, it is restored; otherwise the top-level `model` is removed.
+- **Native credential backup**: before writing a third-party provider's config, the tool automatically backs up any existing native Claude credential (macOS Keychain / `~/.claude/.credentials.json` on Linux) and the current top-level `model` to `~/.config/cc-use-model/claude-native-credentials.backup.json`. The backup is restored automatically when you choose **Clear configuration**, or manually via `restore-login`.
 
 ## Security
 
@@ -247,8 +247,8 @@ cc-use-model restore-login
 - 每次选定 model 后，除合并 `env` 外，还会将顶层 **`model`** 设为当前选择的 model。
 - 使用普通 provider（`apiUrl` / `apiKey`）时：其它 `env` 变量会保留，仅覆盖 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`。
 - 使用 `env` provider 时：会覆盖写入 `env` 中提供的键，以及 `ANTHROPIC_MODEL`；并记录 `envKey`（写入过的 env 键列表），用于下次切换到无 `env` 的 provider 时自动清理这些键。
-- 选择 **清空配置** 选项时：会删除 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`、顶层 `model`，以及之前通过 `env` provider 写入并由 `envKey` 记录的所有键，恢复到无 API Key 状态。
-- **原生凭据自动备份**：切换到第三方 provider 之前，工具会自动将系统中的原生 Claude 凭据（macOS Keychain / Linux 的 `~/.claude/.credentials.json`）备份到 `~/.config/cc-use-model/claude-native-credentials.backup.json`。选择**清空配置**时自动恢复备份，也可通过 `restore-login` 手动恢复。
+- 选择 **清空配置** 选项时：会删除 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`，以及之前通过 `env` provider 写入并由 `envKey` 记录的所有键；如果切换到第三方 provider 前备份过顶层 `model`，会恢复该 model，否则删除顶层 `model`。
+- **原生凭据自动备份**：切换到第三方 provider 之前，工具会自动将系统中的原生 Claude 凭据（macOS Keychain / Linux 的 `~/.claude/.credentials.json`）和当前顶层 `model` 备份到 `~/.config/cc-use-model/claude-native-credentials.backup.json`。选择**清空配置**时自动恢复备份，也可通过 `restore-login` 手动恢复。
 
 ## 安全
 
