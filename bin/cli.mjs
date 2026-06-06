@@ -168,7 +168,7 @@ function restoreNativeCredentialIfNeeded() {
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function parseArgs(argv) {
-  const args = { file: null, command: null, shell: null };
+  const args = { file: null, command: null, shell: null, value: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-f' || a === '--file') {
@@ -181,6 +181,14 @@ function parseArgs(argv) {
       args.command = 'apply-envs';
     } else if (a === 'restore-login') {
       args.command = 'restore-login';
+    } else if (a === 'toggle-bypass' || a === 'toggle-bypass-permissions' || a === 'toggle-skip-permissions') {
+      args.command = 'toggle-bypass';
+      // 可选下一个参数：on/off/true/false 显式设定，否则切换
+      const next = argv[i + 1];
+      if (next && /^(on|off|true|false|enable|disable)$/i.test(next)) {
+        args.value = next.toLowerCase();
+        i++;
+      }
     }
   }
   return args;
@@ -191,8 +199,12 @@ function printHelp() {
 用法: cc-use-model [命令] [选项]
 
 命令:
-  apply-envs          输出当前配置的环境变量语句，供当前 shell 执行
-  restore-login       从备份恢复原生 Claude 登录凭据（Keychain / .credentials.json）
+  apply-envs                       输出当前配置的环境变量语句，供当前 shell 执行
+  restore-login                    从备份恢复原生 Claude 登录凭据（Keychain / .credentials.json）
+  toggle-bypass [on|off]           切换 ~/.claude/settings.json 中的
+                                   permissions.defaultMode = "bypassPermissions"
+                                   （等价于 --dangerously-skip-permissions）。
+                                   不带参数时为切换，带 on/off 时显式开关。
 
 选项:
   -f, --file <path>     凭据文件路径（见下方默认查找顺序）
@@ -211,6 +223,9 @@ function printHelp() {
   eval \$(cc-use-model apply-envs)          bash/zsh: 设置环境变量
   cc-use-model apply-envs | Invoke-Expression  PowerShell: 设置环境变量
   cc-use-model apply-envs --shell cmd     cmd: 输出 set 语句
+  cc-use-model toggle-bypass              切换 bypassPermissions 开关
+  cc-use-model toggle-bypass on           显式开启 bypassPermissions
+  cc-use-model toggle-bypass off          显式关闭 bypassPermissions
 
 会交互选择 provider 与 model，并合并写入 ~/.claude/settings.json 中的 env：
   ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL
@@ -254,6 +269,48 @@ function loadOrInitSettings(settingsPath) {
 
 function settingsPathClaude() {
   return path.join(os.homedir(), '.claude', 'settings.json');
+}
+
+/** 读取当前 settings 中 permissions.defaultMode 是否为 bypassPermissions */
+function isBypassPermissionsEnabled() {
+  const s = loadOrInitSettings(settingsPathClaude());
+  return Boolean(s && s.permissions && s.permissions.defaultMode === 'bypassPermissions');
+}
+
+/**
+ * 切换或显式设置 permissions.defaultMode = "bypassPermissions"。
+ * desired: true=开启，false=关闭，null/undefined=切换。
+ * 返回切换后的最终状态（true/false）。
+ */
+function setBypassPermissions(desired) {
+  const claudeDir = path.join(os.homedir(), '.claude');
+  const settingsPath = settingsPathClaude();
+  if (!fs.existsSync(claudeDir)) {
+    fs.mkdirSync(claudeDir, { recursive: true });
+  }
+  const settings = loadOrInitSettings(settingsPath);
+  const current = Boolean(settings.permissions && settings.permissions.defaultMode === 'bypassPermissions');
+  const next = typeof desired === 'boolean' ? desired : !current;
+
+  if (next) {
+    const permissions = settings.permissions && typeof settings.permissions === 'object' && !Array.isArray(settings.permissions)
+      ? settings.permissions
+      : {};
+    permissions.defaultMode = 'bypassPermissions';
+    settings.permissions = permissions;
+  } else if (settings.permissions && typeof settings.permissions === 'object') {
+    // 关闭时仅清掉 bypassPermissions 这一种 mode，保留 permissions 下的其它字段
+    if (settings.permissions.defaultMode === 'bypassPermissions') {
+      delete settings.permissions.defaultMode;
+    }
+    // 若 permissions 对象因此变空，则整体移除，避免污染配置
+    if (Object.keys(settings.permissions).length === 0) {
+      delete settings.permissions;
+    }
+  }
+
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+  return next;
 }
 
 /** 与 provider 的 apiUrl 比较时统一格式 */
@@ -919,6 +976,22 @@ async function main() {
     process.exit(0);
   }
 
+  // 处理 toggle-bypass 命令
+  if (args.command === 'toggle-bypass') {
+    let desired = null;
+    if (args.value) {
+      desired = ['on', 'true', 'enable'].includes(args.value);
+    }
+    const next = setBypassPermissions(desired);
+    console.log(
+      next
+        ? '已开启：permissions.defaultMode = "bypassPermissions"（等价于 --dangerously-skip-permissions）'
+        : '已关闭：permissions.defaultMode（已移除 bypassPermissions）'
+    );
+    console.log(`配置文件: ${settingsPathClaude()}`);
+    process.exit(0);
+  }
+
   // 解析凭据文件路径
   let credPath;
   if (args.file) {
@@ -979,6 +1052,11 @@ async function main() {
       { name: '➕  添加 Provider', value: 'add' },
       { name: '⚙️  管理凭据（编辑 / 删除）', value: 'manage' },
     ];
+    const bypassOn = isBypassPermissionsEnabled();
+    menuChoices.push({
+      name: `🛡️  切换 bypassPermissions（当前：${bypassOn ? '已开启' : '已关闭'}）`,
+      value: 'toggle-bypass',
+    });
     if (needsClear) {
       menuChoices.push({ name: `🗑️  清空配置（${stateDesc}）`, value: 'clear' });
     }
@@ -1014,6 +1092,14 @@ async function main() {
       });
     } else if (action === 'clear') {
       await clearConfigFlow();
+      // 回到主菜单
+    } else if (action === 'toggle-bypass') {
+      const next = setBypassPermissions(null);
+      console.log(
+        next
+          ? '✅ 已开启 bypassPermissions（permissions.defaultMode = "bypassPermissions"，等价于 --dangerously-skip-permissions）'
+          : '✅ 已关闭 bypassPermissions'
+      );
       // 回到主菜单
     }
   }

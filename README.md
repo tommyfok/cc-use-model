@@ -111,6 +111,25 @@ cc-use-model restore-login
 
 Reads the backup at `~/.config/cc-use-model/claude-native-credentials.backup.json` and writes it back to the system keychain (macOS) or `~/.claude/.credentials.json` (Linux). Not supported on Windows.
 
+### Subcommand `toggle-bypass`
+
+Toggle `permissions.defaultMode = "bypassPermissions"` in `~/.claude/settings.json`. This is equivalent to launching Claude Code with the `--dangerously-skip-permissions` flag, but persists in the global config so every session inherits it.
+
+```bash
+# Toggle (flip the current state)
+cc-use-model toggle-bypass
+
+# Explicitly enable / disable
+cc-use-model toggle-bypass on
+cc-use-model toggle-bypass off
+```
+
+When disabling, only the `defaultMode` field is removed; any other entries under `permissions` (e.g. `allow` / `deny` lists) are preserved. If `permissions` ends up empty, the empty object is removed too.
+
+The interactive menu also shows a `🛡️ Toggle bypassPermissions (current: on/off)` entry that does the same thing.
+
+> ⚠️ Bypassing all permission prompts is risky — only enable it in sandboxed / isolated environments.
+
 ## Behavior
 
 - Preserves other top-level fields in `settings.json` (e.g. `skipDangerousModePermissionPrompt`) that are not part of this update.
@@ -240,6 +259,25 @@ cc-use-model restore-login
 ```
 
 读取 `~/.config/cc-use-model/claude-native-credentials.backup.json` 中的备份，并写回系统 Keychain（macOS）或 `~/.claude/.credentials.json`（Linux）。Windows 暂不支持。
+
+### 子命令 `toggle-bypass`
+
+切换 `~/.claude/settings.json` 中的 `permissions.defaultMode = "bypassPermissions"`。等价于以 `--dangerously-skip-permissions` 启动 Claude Code，区别在于它会持久写入全局配置，之后每次会话都默认生效。
+
+```bash
+# 切换当前状态
+cc-use-model toggle-bypass
+
+# 显式开启 / 关闭
+cc-use-model toggle-bypass on
+cc-use-model toggle-bypass off
+```
+
+关闭时仅移除 `defaultMode` 字段，保留 `permissions` 下的其它配置（如 `allow` / `deny` 列表）；若 `permissions` 因此变空，会一并删除该空对象。
+
+交互菜单中也有 `🛡️ 切换 bypassPermissions（当前：已开启/已关闭）` 选项，效果一致。
+
+> ⚠️ 跳过权限校验存在风险，请仅在沙盒 / 隔离环境中开启。
 
 ## 行为说明
 
