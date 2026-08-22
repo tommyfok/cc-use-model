@@ -534,6 +534,189 @@ function saveCredentials(credPath, credentials) {
   fs.writeFileSync(credPath, JSON.stringify(credentials, null, 2) + '\n', 'utf8');
 }
 
+/** 从 /v1/models 响应中提取模型 ID（兼容 Anthropic 与 OpenAI 两种格式）。 */
+function extractModelIds(body) {
+  if (!body || typeof body !== 'object') return [];
+  const data = Array.isArray(body.data) ? body.data : [];
+  const models = Array.isArray(body.models) ? body.models : [];
+  const list = data.length > 0 ? data : models;
+  const ids = [];
+  for (const item of list) {
+    if (item && typeof item === 'object') {
+      const id = item.id || item.name || item.model;
+      if (typeof id === 'string' && id.trim()) ids.push(id.trim());
+    } else if (typeof item === 'string' && item.trim()) {
+      ids.push(item.trim());
+    }
+  }
+  return [...new Set(ids)];
+}
+
+/** 从上游 Anthropic 兼容 API 获取模型列表。成功返回 string[]，失败抛出带描述的 Error。 */
+async function fetchModelsFromUpstream(apiUrl, apiKey) {
+  const base = normalizeBaseUrl(apiUrl);
+  if (!base) throw new Error('该 provider 未配置 apiUrl，无法同步');
+  if (!apiKey || !String(apiKey).trim()) throw new Error('该 provider 未配置 apiKey，无法同步');
+
+  const endpoint = `${base}/v1/models`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch(endpoint, {
+      method: 'GET',
+      headers: {
+        'x-api-key': String(apiKey),
+        'anthropic-version': '2023-06-01',
+        accept: 'application/json',
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      throw new Error(`上游返回 ${res.status} ${res.statusText}`);
+    }
+    const body = await res.json();
+    const models = extractModelIds(body);
+    if (!models || models.length === 0) {
+      throw new Error('上游返回中未找到任何模型');
+    }
+    return models;
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error('请求超时（10s）');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 交互获取 models：手动输入逗号分隔，或输入 ? 触发从上游同步。返回 string[]。 */
+async function promptModelsWithSync(defaultModels, apiUrl, apiKey) {
+  while (true) {
+    const inputVal = await safePrompt((signal) => input({
+      message: '请输入 Models（逗号分隔，留空清除，输入 ? 从上游同步）',
+      default: defaultModels,
+    }, { signal }));
+    const trimmed = String(inputVal).trim();
+
+    if (trimmed === '?') {
+      console.log(`正在从上游获取模型列表（${apiUrl}）...`);
+      try {
+        const models = await fetchModelsFromUpstream(apiUrl, apiKey);
+        console.log(`发现 ${models.length} 个模型：`);
+        for (const m of models) console.log(`  ${m}`);
+        const ok = await safePrompt((signal) => confirm({
+          message: `确认使用这 ${models.length} 个模型？`,
+          default: true,
+        }, { signal }));
+        if (ok) return models;
+        console.log('已取消，请重新输入。');
+      } catch (e) {
+        console.error(`同步失败: ${e.message}`);
+        console.log('请手动输入。');
+      }
+      continue;
+    }
+
+    return trimmed
+      ? trimmed.split(',').map((m) => m.trim()).filter(Boolean)
+      : [];
+  }
+}
+
+/** 从上游同步模型并写入 provider；成功返回 true，失败/取消返回 false。 */
+async function syncModelsFlow(cfg, target, credentials, credPath) {
+  if (cfg.env) {
+    console.log('注：env provider 无 apiUrl/apiKey，无法从上游同步模型。');
+    return false;
+  }
+  console.log(`正在从上游获取模型列表（${cfg.apiUrl}）...`);
+  let models;
+  try {
+    models = await fetchModelsFromUpstream(cfg.apiUrl, cfg.apiKey);
+  } catch (e) {
+    console.error(`同步失败: ${e.message}`);
+    return false;
+  }
+
+  // 尝试获取上下文窗口信息
+  let contextMap = new Map();
+  try {
+    const base = normalizeBaseUrl(cfg.apiUrl);
+    const endpoint = `${base}/v1/models`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    const res = await fetch(endpoint, {
+      method: 'GET',
+      headers: {
+        'x-api-key': String(cfg.apiKey),
+        'anthropic-version': '2023-06-01',
+        accept: 'application/json',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (res.ok) {
+      const body = await res.json();
+      const infos = extractModelInfo(body);
+      for (const info of infos) {
+        const tokens = info.maxInputTokens || info.contextLength || null;
+        if (tokens != null) contextMap.set(info.id, tokens);
+      }
+    }
+  } catch { /* 获取上下文信息失败不阻塞同步 */ }
+
+  console.log(`发现 ${models.length} 个模型：`);
+  const hasContext = contextMap.size > 0;
+  for (const m of models) {
+    const ctx = contextMap.get(m);
+    const suffix = ctx != null ? ` (context=${formatContextSize(ctx)})` : '';
+    console.log(`  ${m}${suffix}`);
+  }
+  if (!hasContext) console.log('  (上游未返回上下文窗口信息)');
+
+  const ok = await safePrompt((signal) => confirm({
+    message: `确认用这 ${models.length} 个模型覆盖「${target}」的现有列表？`,
+    default: true,
+  }, { signal }));
+  if (!ok) {
+    console.log('已取消。');
+    return false;
+  }
+  credentials[target] = { ...cfg, models };
+  saveCredentials(credPath, credentials);
+  console.log(`已更新: ${target}（models 已从上游同步）`);
+  return true;
+}
+
+/** 从 /v1/models 响应中提取模型信息（含上下文窗口）。兼容 Anthropic / OpenRouter 格式。 */
+function extractModelInfo(body) {
+  if (!body || typeof body !== 'object') return [];
+  const data = Array.isArray(body.data) ? body.data : [];
+  const models = Array.isArray(body.models) ? body.models : [];
+  const list = data.length > 0 ? data : models;
+  const results = [];
+  for (const item of list) {
+    if (item && typeof item === 'object') {
+      const id = item.id || item.name || item.model;
+      if (typeof id === 'string' && id.trim()) {
+        results.push({
+          id: id.trim(),
+          maxInputTokens: typeof item.max_input_tokens === 'number' ? item.max_input_tokens : null,
+          contextLength: typeof item.context_length === 'number' ? item.context_length : null,
+        });
+      }
+    }
+  }
+  return results;
+}
+
+/** 格式化上下文窗口大小。 */
+function formatContextSize(tokens) {
+  if (tokens == null) return '?';
+  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(0)}K`;
+  return String(tokens);
+}
+
 /** 管理凭据：列出 / 编辑 / 删除 */
 async function manageCredentials(credentials, credPath, { currentUrlNorm, currentEnvKey }) {
   while (true) {
@@ -582,6 +765,7 @@ async function manageCredentials(credentials, credPath, { currentUrlNorm, curren
       message: `选择对 ${target} 的操作`,
       choices: [
         { name: '✏️  编辑', value: 'edit' },
+        { name: '🔄  从上游同步模型', value: 'sync' },
         { name: '🗑️  删除', value: 'delete' },
         { name: '← 返回', value: 'back' },
       ],
@@ -601,6 +785,11 @@ async function manageCredentials(credentials, credPath, { currentUrlNorm, curren
       delete credentials[target];
       saveCredentials(credPath, credentials);
       console.log(`已删除: ${target}`);
+      continue;
+    }
+
+    if (op === 'sync') {
+      await syncModelsFlow(cfg, target, credentials, credPath);
       continue;
     }
 
@@ -637,13 +826,11 @@ async function manageCredentials(credentials, credPath, { currentUrlNorm, curren
         validate: (v) => (v && String(v).trim() ? true : '不能为空'),
       }, { signal }));
 
-      const modelsInput = await safePrompt((signal) => input({
-        message: '请输入 Models（逗号分隔，留空清除）',
-        default: cfg.models?.join(', ') || '',
-      }, { signal }));
-      const models = modelsInput
-        ? modelsInput.split(',').map((m) => m.trim()).filter(Boolean)
-        : [];
+      const models = await promptModelsWithSync(
+        cfg.models?.join(', ') || '',
+        apiUrl.trim(),
+        apiKey.trim()
+      );
 
       credentials[target] = {
         apiUrl: apiUrl.trim(),
