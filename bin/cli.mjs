@@ -763,6 +763,42 @@ function formatContextSize(tokens) {
   return String(tokens);
 }
 
+/** 手动维护上下文长度：勾选=加 [1m] 后缀，未勾选=去 [1m] 后缀。成功返回 true，取消/无模型返回 false。 */
+async function maintainContextLengthFlow(cfg, target, credentials, credPath) {
+  const models = Array.isArray(cfg.models) && cfg.models.length > 0
+    ? cfg.models.map((m) => String(m))
+    : [];
+
+  if (models.length === 0) {
+    console.log(`「${target}」未配置 models，无法维护上下文长度。`);
+    return false;
+  }
+
+  const choices = models.map((m) => {
+    const hasSuffix = /\[1m\]\s*$/.test(m);
+    return { name: m, value: m, checked: hasSuffix };
+  });
+
+  const selected = await safePrompt((signal) => checkbox({
+    message: `手动维护上下文长度 — 勾选的模型带 [1m] 后缀（${target}）`,
+    choices,
+    pageSize: 15,
+  }, { signal }));
+
+  const selectedSet = new Set(selected);
+  const updated = models.map((m) => {
+    if (selectedSet.has(m)) {
+      return /\[1m\]\s*$/.test(m) ? m : `${m}[1m]`;
+    }
+    return m.replace(/\[1m\]\s*$/, '');
+  });
+
+  credentials[target] = { ...cfg, models: updated };
+  saveCredentials(credPath, credentials);
+  console.log(`已更新: ${target}（上下文长度 [1m] 标记已维护）`);
+  return true;
+}
+
 /** 管理凭据：列出 / 编辑 / 删除 */
 async function manageCredentials(credentials, credPath, { currentUrlNorm, currentEnvKey }) {
   while (true) {
@@ -812,6 +848,7 @@ async function manageCredentials(credentials, credPath, { currentUrlNorm, curren
       choices: [
         { name: '✏️  编辑', value: 'edit' },
         { name: '🔄  从上游同步模型', value: 'sync' },
+        { name: '📏  手动维护上下文长度', value: 'context' },
         { name: '🗑️  删除', value: 'delete' },
         { name: '← 返回', value: 'back' },
       ],
@@ -836,6 +873,11 @@ async function manageCredentials(credentials, credPath, { currentUrlNorm, curren
 
     if (op === 'sync') {
       await syncModelsFlow(cfg, target, credentials, credPath);
+      continue;
+    }
+
+    if (op === 'context') {
+      await maintainContextLengthFlow(cfg, target, credentials, credPath);
       continue;
     }
 
