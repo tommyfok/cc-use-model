@@ -727,9 +727,24 @@ async function syncModelsFlow(cfg, target, credentials, credPath) {
     }
   }
 
-  credentials[target] = { ...cfg, models: selected };
+  // 保留已有 [1m] 后缀：若上游模型名（去掉 [1m]）与现有模型同名，则沿用现有状态
+  const existingModels = Array.isArray(cfg.models) && cfg.models.length > 0
+    ? cfg.models.map((m) => String(m))
+    : [];
+  const existingSuffixMap = new Map();
+  for (const m of existingModels) {
+    if (/\[1m\]\s*$/.test(m)) {
+      existingSuffixMap.set(m.replace(/\[1m\]\s*$/, ''), true);
+    }
+  }
+  const finalModels = selected.map((m) => {
+    const base = m.replace(/\[1m\]\s*$/, '');
+    return existingSuffixMap.get(base) ? `${base}[1m]` : m;
+  });
+
+  credentials[target] = { ...cfg, models: finalModels };
   saveCredentials(credPath, credentials);
-  console.log(`已更新: ${target}（models 已从上游同步）`);
+  console.log(`已更新: ${target}（models 已从上游同步，已保留现有 [1m] 后缀）`);
   return true;
 }
 
