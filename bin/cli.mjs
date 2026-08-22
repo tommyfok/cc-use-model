@@ -8,7 +8,7 @@ import os from 'node:os';
 import readline from 'node:readline';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { select, input, confirm } from '@inquirer/prompts';
+import { select, input, confirm, checkbox } from '@inquirer/prompts';
 
 const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const BACKUP_PATH = path.join(os.homedir(), '.config', 'cc-use-model', 'claude-native-credentials.backup.json');
@@ -601,14 +601,33 @@ async function promptModelsWithSync(defaultModels, apiUrl, apiKey) {
       console.log(`正在从上游获取模型列表（${apiUrl}）...`);
       try {
         const models = await fetchModelsFromUpstream(apiUrl, apiKey);
-        console.log(`发现 ${models.length} 个模型：`);
-        for (const m of models) console.log(`  ${m}`);
-        const ok = await safePrompt((signal) => confirm({
-          message: `确认使用这 ${models.length} 个模型？`,
-          default: true,
+        const selected = await safePrompt((signal) => checkbox({
+          message: `发现 ${models.length} 个模型（空格切换，回车确认）`,
+          choices: models.map((m) => ({ name: m, value: m, checked: true })),
+          pageSize: 15,
         }, { signal }));
-        if (ok) return models;
-        console.log('已取消，请重新输入。');
+        if (selected.length === 0) {
+          const ok = await safePrompt((signal) => confirm({
+            message: '未选择任何模型，确认清空模型列表？',
+            default: false,
+          }, { signal }));
+          if (ok) return [];
+          console.log('已取消，请重新输入。');
+        } else if (selected.length < models.length) {
+          const ok = await safePrompt((signal) => confirm({
+            message: `已选择 ${selected.length}/${models.length} 个模型，确认使用？`,
+            default: true,
+          }, { signal }));
+          if (ok) return selected;
+          console.log('已取消，请重新输入。');
+        } else {
+          const ok = await safePrompt((signal) => confirm({
+            message: `确认使用这 ${models.length} 个模型？`,
+            default: true,
+          }, { signal }));
+          if (ok) return selected;
+          console.log('已取消，请重新输入。');
+        }
       } catch (e) {
         console.error(`同步失败: ${e.message}`);
         console.log('请手动输入。');
@@ -666,22 +685,49 @@ async function syncModelsFlow(cfg, target, credentials, credPath) {
 
   console.log(`发现 ${models.length} 个模型：`);
   const hasContext = contextMap.size > 0;
-  for (const m of models) {
+  const choices = models.map((m) => {
     const ctx = contextMap.get(m);
     const suffix = ctx != null ? ` (context=${formatContextSize(ctx)})` : '';
-    console.log(`  ${m}${suffix}`);
-  }
+    return { name: `${m}${suffix}`, value: m, checked: true };
+  });
   if (!hasContext) console.log('  (上游未返回上下文窗口信息)');
 
-  const ok = await safePrompt((signal) => confirm({
-    message: `确认用这 ${models.length} 个模型覆盖「${target}」的现有列表？`,
-    default: true,
+  const selected = await safePrompt((signal) => checkbox({
+    message: `发现 ${models.length} 个模型（空格切换，回车确认）`,
+    choices,
+    pageSize: 15,
   }, { signal }));
-  if (!ok) {
-    console.log('已取消。');
-    return false;
+
+  if (selected.length === 0) {
+    const ok = await safePrompt((signal) => confirm({
+      message: '未选择任何模型，确认清空模型列表？',
+      default: false,
+    }, { signal }));
+    if (!ok) {
+      console.log('已取消。');
+      return false;
+    }
+  } else if (selected.length < models.length) {
+    const ok = await safePrompt((signal) => confirm({
+      message: `已选择 ${selected.length}/${models.length} 个模型，确认覆盖「${target}」的现有列表？`,
+      default: true,
+    }, { signal }));
+    if (!ok) {
+      console.log('已取消。');
+      return false;
+    }
+  } else {
+    const ok = await safePrompt((signal) => confirm({
+      message: `确认用这 ${models.length} 个模型覆盖「${target}」的现有列表？`,
+      default: true,
+    }, { signal }));
+    if (!ok) {
+      console.log('已取消。');
+      return false;
+    }
   }
-  credentials[target] = { ...cfg, models };
+
+  credentials[target] = { ...cfg, models: selected };
   saveCredentials(credPath, credentials);
   console.log(`已更新: ${target}（models 已从上游同步）`);
   return true;
