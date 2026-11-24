@@ -99,7 +99,7 @@ Options:
 | ------ | ----------- |
 | `--shell <type>` | Force output format: `bash`, `zsh`, `powershell`, or `cmd`. Auto-detected from environment if omitted. |
 
-Outputs `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and any other variables previously written by an `env` provider and listed in `envKey`. Exits with a non-zero status if nothing is configured.
+Outputs `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, the model tier variables (`ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`), and any other variables previously written by an `env` provider and listed in `envKey`. Exits with a non-zero status if nothing is configured.
 
 ### Subcommand `restore-login`
 
@@ -135,8 +135,9 @@ The interactive menu also shows a `🛡️ Toggle bypassPermissions (current: on
 - Preserves other top-level fields in `settings.json` (e.g. `skipDangerousModePermissionPrompt`) that are not part of this update.
 - After you pick a model, sets the top-level **`model`** field to that choice in addition to merging `env`.
 - **Standard provider** (`apiUrl` / `apiKey`): keeps other `env` entries; only overwrites `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and `ANTHROPIC_MODEL`.
-- **`env` provider**: writes the keys from `env` plus `ANTHROPIC_MODEL`; stores `envKey` (list of keys from that provider) so switching back to a standard provider can remove those keys automatically.
-- **Clear configuration**: removes `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and all keys previously written via `env` providers (as tracked by `envKey`). If the previous top-level `model` was backed up before switching to a third-party provider, it is restored; otherwise the top-level `model` is removed.
+- **Model tiers** (both provider types): `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, and `CLAUDE_CODE_SUBAGENT_MODEL` are all set to the selected model, so background calls, `/model` aliases, and subagents don't fall back to official model IDs the gateway may not serve.
+- **`env` provider**: removes any leftover `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` from a previous standard provider, then writes the keys from `env` plus `ANTHROPIC_MODEL`; stores `envKey` (list of keys from that provider) so switching back to a standard provider can remove those keys automatically.
+- **Clear configuration**: removes `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, the model tier variables, and all keys previously written via `env` providers (as tracked by `envKey`). If the previous top-level `model` was backed up before switching to a third-party provider, it is restored; otherwise the top-level `model` is removed.
 - **Native credential backup**: before writing a third-party provider's config, the tool automatically backs up any existing native Claude credential (macOS Keychain / `~/.claude/.credentials.json` on Linux) and the current top-level `model` to `~/.config/cc-use-model/claude-native-credentials.backup.json`. The backup is restored automatically when you choose **Clear configuration**, or manually via `restore-login`.
 
 ## Security
@@ -248,7 +249,7 @@ cc-use-model apply-envs --shell cmd
 | ---- | ---- |
 | `--shell <type>` | 指定输出格式：`bash`、`zsh`、`powershell` 或 `cmd`。不指定时自动检测。 |
 
-会输出 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`，以及此前由 `env` provider 写入且记录在 `envKey` 中的其它变量。若当前无任何配置，命令会以非零退出码结束。
+会输出 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`、档位模型变量（`ANTHROPIC_DEFAULT_OPUS_MODEL`、`ANTHROPIC_DEFAULT_SONNET_MODEL`、`ANTHROPIC_DEFAULT_HAIKU_MODEL`、`CLAUDE_CODE_SUBAGENT_MODEL`），以及此前由 `env` provider 写入且记录在 `envKey` 中的其它变量。若当前无任何配置，命令会以非零退出码结束。
 
 ### 子命令 `restore-login`
 
@@ -284,8 +285,9 @@ cc-use-model toggle-bypass off
 - 会**保留** `settings.json` 里除本次写入涉及的字段外的其它顶层字段（如 `skipDangerousModePermissionPrompt`）。
 - 每次选定 model 后，除合并 `env` 外，还会将顶层 **`model`** 设为当前选择的 model。
 - 使用普通 provider（`apiUrl` / `apiKey`）时：其它 `env` 变量会保留，仅覆盖 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`。
-- 使用 `env` provider 时：会覆盖写入 `env` 中提供的键，以及 `ANTHROPIC_MODEL`；并记录 `envKey`（写入过的 env 键列表），用于下次切换到无 `env` 的 provider 时自动清理这些键。
-- 选择 **清空配置** 选项时：会删除 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`，以及之前通过 `env` provider 写入并由 `envKey` 记录的所有键；如果切换到第三方 provider 前备份过顶层 `model`，会恢复该 model，否则删除顶层 `model`。
+- 两类 provider 都会把 `ANTHROPIC_DEFAULT_OPUS_MODEL`、`ANTHROPIC_DEFAULT_SONNET_MODEL`、`ANTHROPIC_DEFAULT_HAIKU_MODEL`、`CLAUDE_CODE_SUBAGENT_MODEL` 统一写成选中的 model，避免后台调用、`/model` 别名和子 agent 仍去请求网关不支持的官方模型 ID。
+- 使用 `env` provider 时：会先删除上一个普通 provider 残留的 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`，再覆盖写入 `env` 中提供的键，以及 `ANTHROPIC_MODEL`；并记录 `envKey`（写入过的 env 键列表），用于下次切换到无 `env` 的 provider 时自动清理这些键。
+- 选择 **清空配置** 选项时：会删除 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`、档位模型变量，以及之前通过 `env` provider 写入并由 `envKey` 记录的所有键；如果切换到第三方 provider 前备份过顶层 `model`，会恢复该 model，否则删除顶层 `model`。
 - **原生凭据自动备份**：切换到第三方 provider 之前，工具会自动将系统中的原生 Claude 凭据（macOS Keychain / Linux 的 `~/.claude/.credentials.json`）和当前顶层 `model` 备份到 `~/.config/cc-use-model/claude-native-credentials.backup.json`。选择**清空配置**时自动恢复备份，也可通过 `restore-login` 手动恢复。
 
 ## 安全

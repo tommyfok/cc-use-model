@@ -229,6 +229,8 @@ function printHelp() {
 
 会交互选择 provider 与 model，并合并写入 ~/.claude/settings.json 中的 env：
   ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL
+  ANTHROPIC_DEFAULT_OPUS_MODEL / ANTHROPIC_DEFAULT_SONNET_MODEL /
+  ANTHROPIC_DEFAULT_HAIKU_MODEL / CLAUDE_CODE_SUBAGENT_MODEL（均填同一个 model）
 `);
 }
 
@@ -410,6 +412,9 @@ function outputApplyEnvs(shell) {
   }
   if (env.ANTHROPIC_MODEL) {
     lines.push(formatEnvLine(shell, 'ANTHROPIC_MODEL', env.ANTHROPIC_MODEL));
+  }
+  for (const k of MODEL_TIER_KEYS) {
+    if (env[k]) lines.push(formatEnvLine(shell, k, String(env[k])));
   }
 
   // 输出 envKey 对应的其他变量
@@ -1030,6 +1035,14 @@ async function addProviderFlow(credentials, credPath) {
   return newProviderName;
 }
 
+/** Claude Code 按档位/用途取模型的变量；切换时统一填成选中的 model，避免后台、别名、子 agent 请求官方模型 ID */
+const MODEL_TIER_KEYS = [
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'CLAUDE_CODE_SUBAGENT_MODEL',
+];
+
 /** 把选好的 provider/model 写入 settings.json */
 function applySettings(cfg, model) {
   backupNativeCredentialIfNeeded();
@@ -1048,6 +1061,9 @@ function applySettings(cfg, model) {
       if (typeof k === 'string' && k in env) delete env[k];
     }
   }
+  // 清掉上一个 apiUrl 型 provider 的残留，避免切到 env 型 provider 后仍带着旧网关地址/令牌
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  delete env.ANTHROPIC_BASE_URL;
 
   if (cfg.env) {
     for (const [k, v] of Object.entries(cfg.env)) {
@@ -1061,6 +1077,7 @@ function applySettings(cfg, model) {
     env.ANTHROPIC_BASE_URL = cfg.apiUrl;
     env.ANTHROPIC_MODEL = model;
   }
+  for (const k of MODEL_TIER_KEYS) env[k] = model;
 
   settings.env = env;
   settings.model = model;
@@ -1134,13 +1151,14 @@ async function selectAndApplyFlow(credentials, presetProvider = null) {
     }
 
     let preview;
+    const tierPreview = `  ${MODEL_TIER_KEYS.join(' / ')}: ${model}`;
     if (cfg.env) {
       const envPairs = Object.entries(cfg.env)
         .map(([k, v]) => `  ${k}: ${k.toLowerCase().includes('token') || k.toLowerCase().includes('key') ? '（已隐藏）' : v}`)
         .join('\n');
-      preview = `将写入 ~/.claude/settings.json：\n${envPairs}\n  ANTHROPIC_MODEL: ${model}\n确认？`;
+      preview = `将写入 ~/.claude/settings.json：\n${envPairs}\n  ANTHROPIC_MODEL: ${model}\n${tierPreview}\n确认？`;
     } else {
-      preview = `将写入 ~/.claude/settings.json：\n  ANTHROPIC_BASE_URL: ${cfg.apiUrl}\n  ANTHROPIC_MODEL: ${model}\n  ANTHROPIC_AUTH_TOKEN: （已隐藏）\n确认？`;
+      preview = `将写入 ~/.claude/settings.json：\n  ANTHROPIC_BASE_URL: ${cfg.apiUrl}\n  ANTHROPIC_MODEL: ${model}\n${tierPreview}\n  ANTHROPIC_AUTH_TOKEN: （已隐藏）\n确认？`;
     }
 
     const ok = await safePrompt((signal) => confirm({ message: preview, default: true }, { signal }));
@@ -1183,6 +1201,7 @@ async function clearConfigFlow() {
   delete env.ANTHROPIC_AUTH_TOKEN;
   delete env.ANTHROPIC_BASE_URL;
   delete env.ANTHROPIC_MODEL;
+  for (const k of MODEL_TIER_KEYS) delete env[k];
 
   delete settings.model;
   settings.env = env;
